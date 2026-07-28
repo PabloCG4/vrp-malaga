@@ -1,0 +1,18 @@
+# Project: Dynamic VRP Simulator (TFM Level)
+
+## Architecture Principles
+- **Separation of Concerns:** Strict isolation between the simulation tick (event loop), the HTTP/WebSocket API, and the CPU-heavy mathematical routing engine (must run in separate processes/worker pools).
+- **Graph Integrity:** Always treat the map as a Directed Graph (DiGraph). Preprocess to guarantee a strongly connected component before routing.
+- **Network Efficiency:** Send coordinate updates to the client ONLY when a vehicle reaches a new graph node. Client interpolates movement.
+
+## Technology Stack
+- **Backend:** Python 3.11+ (FastAPI, Asyncio, WebSockets).
+- **Data & Math:** OSMnx, NetworkX, NumPy.
+- **Frontend:** HTML/JS + Leaflet or Mapbox GL JS.
+
+## Strict Coding Style (Non-Negotiable)
+- **Language:** All code comments and documentation strings MUST be in English.
+- **Naming:** Write human-readable, highly intuitive variable names. NEVER use variables starting with an underscore (`_var`).
+- **Formality:** The code is for a Master's Thesis (TFM). Maintain strict formality. NO emojis anywhere in the code, comments, or terminal outputs. No weird punctuation.
+- **Modification Rule:** When modifying existing code, ALWAYS preserve the original comments unless they are invalidated by the new logic. Do not add comments referencing "our conversation" or "the prompt".
+- **Typing:** Enforce strict Python type hinting.
