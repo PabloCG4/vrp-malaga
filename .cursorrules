@@ -22,3 +22,8 @@
 - **Structure:** Use the file path as an H3 heading (e.g., `### backend/src/topology/extractor.py`). If the heading does not exist, create it. If it already exists, append the new information below the existing content.
 - **Content Style:** Write brief, high-level technical reports explaining the architectural reasoning and mathematical/logical decisions behind the code. Do not just list what was changed; explain *why*.
 - **History Preservation:** NEVER delete, overwrite, or summarize older entries under a file's heading. Always append new updates as new bullet points with a date/timestamp to preserve the complete evolution of the implementation.
+
+## Implementation Depth & Robustness (No Shortcuts)
+- **Zero Mocking:** Implement fully functional, production-grade logic. Never use placeholders (`pass`, `TODO`, `NotImplementedError`), hardcoded mock data, or naive heuristic approximations to bypass complex algorithmic work.
+- **Resilience:** Code must not just compile; it must be mathematically sound and robust. Always anticipate and explicitly handle edge cases, invalid inputs, and runtime exceptions.
+- **Completeness:** If a feature requires defining supplementary data structures, helper functions, or specific error classes to be truly robust, implement them completely within the same iteration.
