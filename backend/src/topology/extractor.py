@@ -3,13 +3,17 @@ Street network extraction and visualization utilities for the VRP Simulator.
 
 This module is responsible for downloading the drivable street network of a
 target urban area from OpenStreetMap (via OSMnx), reducing it to its largest
-strongly connected component so that it is suitable for vehicle routing, and
-rendering it on an interactive Leaflet map (via Folium) for visual
-validation, including the directionality of each street.
+strongly connected component so that it is suitable for vehicle routing,
+imputing speed limits and travel times for every edge, and rendering the
+result on an interactive Leaflet map (via Folium) for visual validation,
+including the directionality of each street. The fully processed graph is
+also serialized to disk so that the backend can load it instantaneously at
+startup instead of re-downloading and reprocessing it on every run.
 """
 
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 
 import folium
@@ -25,6 +29,37 @@ NETWORK_RADIUS_METERS: float = 2000.0
 
 # Destination path for the generated interactive map preview.
 OUTPUT_MAP_PATH: Path = Path(__file__).resolve().parents[2] / "data" / "malaga_preview.html"
+
+# Destination path for the serialized, fully processed graph.
+PROCESSED_GRAPH_PATH: Path = Path(__file__).resolve().parents[2] / "data" / "malaga_graph.pkl"
+
+# Typical free-flow speeds (km per hour) per OSM highway type, used to impute
+# missing "maxspeed" values. These reflect common Spanish urban and interurban
+# speed limits and are only applied to edges of a given highway type that have
+# no preexisting "maxspeed" tag on any edge of that same type.
+DEFAULT_HIGHWAY_SPEEDS_KPH: dict[str, float] = {
+    "motorway": 100.0,
+    "motorway_link": 70.0,
+    "trunk": 90.0,
+    "trunk_link": 50.0,
+    "primary": 50.0,
+    "primary_link": 40.0,
+    "secondary": 50.0,
+    "secondary_link": 40.0,
+    "tertiary": 50.0,
+    "tertiary_link": 40.0,
+    "unclassified": 40.0,
+    "residential": 30.0,
+    "living_street": 20.0,
+    "service": 20.0,
+    "pedestrian": 10.0,
+    "track": 20.0,
+    "road": 30.0,
+}
+
+# Fallback speed (km per hour) for any highway type absent from
+# DEFAULT_HIGHWAY_SPEEDS_KPH that also has no preexisting "maxspeed" data.
+FALLBACK_SPEED_KPH: float = 30.0
 
 
 def download_drive_network(
@@ -72,6 +107,66 @@ def download_drive_network(
     ).copy()
 
     return strongly_connected_street_network
+
+
+def compute_edge_travel_times(street_network_graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    """
+    Impute missing speed limits and compute free-flow travel times for every edge.
+
+    OpenStreetMap "maxspeed" tags are frequently missing, so speed limits are
+    first imputed per edge using `DEFAULT_HIGHWAY_SPEEDS_KPH` as a per-highway
+    fallback (with `FALLBACK_SPEED_KPH` as a last resort), then travel times
+    are derived from each edge's length and imputed speed. This produces a
+    fully weighted graph, which is required as an input for the shortest-path
+    and routing algorithms of the simulation engine.
+
+    Parameters
+    ----------
+    street_network_graph:
+        The graph whose edges must hold a "length" attribute, as produced by
+        OSMnx.
+
+    Returns
+    -------
+    networkx.MultiDiGraph
+        The same graph, enriched with "speed_kph" and "travel_time" edge
+        attributes.
+    """
+    street_network_graph_with_speeds = ox.add_edge_speeds(
+        street_network_graph,
+        hwy_speeds=DEFAULT_HIGHWAY_SPEEDS_KPH,
+        fallback=FALLBACK_SPEED_KPH,
+    )
+    street_network_graph_with_travel_times = ox.add_edge_travel_times(street_network_graph_with_speeds)
+
+    return street_network_graph_with_travel_times
+
+
+def save_processed_graph(
+    street_network_graph: nx.MultiDiGraph, output_path: Path = PROCESSED_GRAPH_PATH
+) -> None:
+    """
+    Serialize the fully processed graph to disk using pickle.
+
+    Pickle is chosen over text-based formats (such as GraphML) because it
+    preserves the exact in-memory `MultiDiGraph` structure and its attribute
+    types without any parsing overhead, allowing the backend to deserialize
+    it directly into a ready-to-use NetworkX object when the simulation
+    starts, rather than re-downloading and reprocessing the network on every
+    run.
+
+    Parameters
+    ----------
+    street_network_graph:
+        The processed graph (strongly connected, with speed and travel time
+        attributes) to persist.
+    output_path:
+        Destination path for the generated pickle file. Parent directories
+        are created automatically if they do not already exist.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as processed_graph_file:
+        pickle.dump(street_network_graph, processed_graph_file, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def build_interactive_map(street_network_graph: nx.MultiDiGraph) -> folium.Map:
@@ -167,8 +262,14 @@ if __name__ == "__main__":
         f"{malaga_street_network.number_of_edges()} edges."
     )
 
+    print("Imputing speed limits and computing edge travel times.")
+    malaga_street_network = compute_edge_travel_times(malaga_street_network)
+
     print("Building the interactive visualization map.")
     malaga_interactive_map = build_interactive_map(malaga_street_network)
 
     save_map_to_html(malaga_interactive_map)
     print(f"Map saved to: {OUTPUT_MAP_PATH}")
+
+    save_processed_graph(malaga_street_network)
+    print(f"Processed graph serialized to: {PROCESSED_GRAPH_PATH}")
