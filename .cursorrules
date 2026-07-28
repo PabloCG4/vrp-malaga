@@ -12,7 +12,13 @@
 
 ## Strict Coding Style (Non-Negotiable)
 - **Language:** All code comments and documentation strings MUST be in English.
-- **Naming:** Write human-readable, highly intuitive variable names. NEVER use variables starting with an underscore (`_var`).
+- **Naming:** Write human-readable, highly intuitive variable names. 
 - **Formality:** The code is for a Master's Thesis (TFM). Maintain strict formality. NO emojis anywhere in the code, comments, or terminal outputs. No weird punctuation.
 - **Modification Rule:** When modifying existing code, ALWAYS preserve the original comments unless they are invalidated by the new logic. Do not add comments referencing "our conversation" or "the prompt".
 - **Typing:** Enforce strict Python type hinting.
+
+## Technical Changelog Maintenance
+- **Requirement:** Every time you create or significantly modify a file, you MUST document the changes in `docs/TECHNICAL_CHANGELOG.md`.
+- **Structure:** Use the file path as an H3 heading (e.g., `### backend/src/topology/extractor.py`). If the heading does not exist, create it. If it already exists, append the new information below the existing content.
+- **Content Style:** Write brief, high-level technical reports explaining the architectural reasoning and mathematical/logical decisions behind the code. Do not just list what was changed; explain *why*.
+- **History Preservation:** NEVER delete, overwrite, or summarize older entries under a file's heading. Always append new updates as new bullet points with a date/timestamp to preserve the complete evolution of the implementation.
