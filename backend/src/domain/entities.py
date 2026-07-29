@@ -11,6 +11,20 @@ index 0 of a `CostMatrix`) rather than of the domain model, so this module can
 be tested and reasoned about in complete isolation from OSMnx, NetworkX or
 NumPy.
 
+The model extends the standard Capacitated VRP with three realistic
+operational constraints that the route clock simulator in
+`backend/src/solver/evaluator.py` is responsible for enforcing:
+
+- Soft delivery time windows (`Customer.time_window`), which penalize but do
+  not forbid a late arrival.
+- Per-stop service time (`Customer.service_time_seconds`), which advances the
+  route clock before the vehicle may depart towards its next stop.
+- European Union driver rest regulations (`Vehicle.max_workday_seconds`,
+  `Vehicle.max_continuous_driving_seconds`, `Vehicle.mandatory_break_seconds`),
+  modelled after Regulation (EC) No 561/2006: a driver may not drive for more
+  than 4.5 continuous hours without a 45-minute break, and an 8-hour workday
+  is treated as the vehicle's hard operating budget for the day.
+
 Every entity is an immutable, frozen dataclass. This is the design decision
 that makes cloning a `VRPState` during neighborhood search both fast and
 memory-efficient: a local move that only changes one route can build a new
@@ -22,6 +36,7 @@ nothing in this module can be mutated in place after construction.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -56,6 +71,41 @@ class IncompleteCoverageError(DomainError):
 
 
 @dataclass(frozen=True, slots=True)
+class TimeWindow:
+    """
+    A soft delivery time window, in seconds elapsed since the workday start.
+
+    The window is soft by design: arriving before `start_seconds` merely
+    forces the vehicle to wait, and arriving after `end_seconds` is legal but
+    incurs a penalty proportional to the lateness, applied by the evaluator.
+    A customer with no real restriction can be modelled with
+    `TimeWindow(0.0, math.inf)`.
+
+    Attributes
+    ----------
+    start_seconds:
+        Earliest time, relative to workday start, at which service may begin.
+    end_seconds:
+        Latest time, relative to workday start, at which the vehicle should
+        ideally have arrived. Arriving later remains possible but is penalized.
+    """
+
+    start_seconds: float
+    end_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.start_seconds < 0.0:
+            message = f"Time window start ({self.start_seconds}) cannot be negative."
+            raise ValueError(message)
+        if self.end_seconds < self.start_seconds:
+            message = (
+                f"Time window end ({self.end_seconds}) cannot precede its start "
+                f"({self.start_seconds})."
+            )
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
 class Customer:
     """
     A single delivery point that must be visited exactly once during the workday.
@@ -71,14 +121,30 @@ class Customer:
         for example kilograms of weight or cubic meters of volume. The unit is
         a modelling choice of the caller and must stay consistent with
         `Vehicle.max_capacity`.
+    service_time_seconds:
+        Time the vehicle must spend at this customer's node performing the
+        delivery itself (unloading, handover, paperwork), before it may
+        depart towards its next stop. Does not include any waiting time
+        incurred by arriving before `time_window.start_seconds`.
+    time_window:
+        Soft delivery time window for this customer, relative to workday
+        start. Defaults to an unrestricted window covering the whole day.
     """
 
     node_id: int
     demand: float
+    service_time_seconds: float = 0.0
+    time_window: TimeWindow = field(default_factory=lambda: TimeWindow(0.0, math.inf))
 
     def __post_init__(self) -> None:
         if self.demand < 0.0:
             message = f"Customer at node {self.node_id} has a negative demand ({self.demand})."
+            raise ValueError(message)
+        if self.service_time_seconds < 0.0:
+            message = (
+                f"Customer at node {self.node_id} has a negative service time "
+                f"({self.service_time_seconds})."
+            )
             raise ValueError(message)
 
 
@@ -87,6 +153,12 @@ class Vehicle:
     """
     A single vehicle available to the fleet for the workday.
 
+    The three time-related attributes model the driving and rest limits of
+    European Union Regulation (EC) No 561/2006: a driver must take a break of
+    `mandatory_break_seconds` after at most `max_continuous_driving_seconds`
+    of uninterrupted driving, and the vehicle's entire workday, driving plus
+    waiting plus service plus breaks, is bounded by `max_workday_seconds`.
+
     Attributes
     ----------
     vehicle_id:
@@ -94,15 +166,48 @@ class Vehicle:
     max_capacity:
         Maximum load, expressed in the same capacity units as
         `Customer.demand`, that this vehicle may carry at once.
+    max_workday_seconds:
+        Maximum duration of the vehicle's entire workday, from departing the
+        depot to returning to it, including driving, waiting, service and
+        rest break time. Defaults to 28800.0 seconds (8 hours).
+    max_continuous_driving_seconds:
+        Maximum driving time the vehicle may accumulate before a mandatory
+        rest break resets the counter. Defaults to 16200.0 seconds (4.5
+        hours), the EU regulatory limit.
+    mandatory_break_seconds:
+        Duration of the rest break the driver must take once
+        `max_continuous_driving_seconds` would otherwise be exceeded.
+        Defaults to 2700.0 seconds (45 minutes), the EU regulatory minimum.
     """
 
     vehicle_id: str
     max_capacity: float
+    max_workday_seconds: float = 28800.0
+    max_continuous_driving_seconds: float = 16200.0
+    mandatory_break_seconds: float = 2700.0
 
     def __post_init__(self) -> None:
         if self.max_capacity <= 0.0:
             message = (
                 f"Vehicle '{self.vehicle_id}' has a non-positive capacity ({self.max_capacity})."
+            )
+            raise ValueError(message)
+        if self.max_workday_seconds <= 0.0:
+            message = (
+                f"Vehicle '{self.vehicle_id}' has a non-positive maximum workday duration "
+                f"({self.max_workday_seconds})."
+            )
+            raise ValueError(message)
+        if self.max_continuous_driving_seconds <= 0.0:
+            message = (
+                f"Vehicle '{self.vehicle_id}' has a non-positive maximum continuous driving "
+                f"time ({self.max_continuous_driving_seconds})."
+            )
+            raise ValueError(message)
+        if self.mandatory_break_seconds < 0.0:
+            message = (
+                f"Vehicle '{self.vehicle_id}' has a negative mandatory break duration "
+                f"({self.mandatory_break_seconds})."
             )
             raise ValueError(message)
 
