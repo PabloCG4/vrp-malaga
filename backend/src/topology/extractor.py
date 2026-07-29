@@ -132,11 +132,13 @@ def compute_edge_travel_times(street_network_graph: nx.MultiDiGraph) -> nx.Multi
         The same graph, enriched with "speed_kph" and "travel_time" edge
         attributes.
     """
+    # Add speed limits to the graph using 'highway' type from the graph edges.
     street_network_graph_with_speeds = ox.add_edge_speeds(
         street_network_graph,
         hwy_speeds=DEFAULT_HIGHWAY_SPEEDS_KPH,
         fallback=FALLBACK_SPEED_KPH,
     )
+    # Add travel times to the graph using the speed limits
     street_network_graph_with_travel_times = ox.add_edge_travel_times(street_network_graph_with_speeds)
 
     return street_network_graph_with_travel_times
@@ -167,6 +169,44 @@ def save_processed_graph(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as processed_graph_file:
         pickle.dump(street_network_graph, processed_graph_file, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_processed_graph(input_path: Path = PROCESSED_GRAPH_PATH) -> nx.MultiDiGraph:
+    """
+    Deserialize the processed graph previously written by `save_processed_graph`.
+
+    This is the counterpart of `save_processed_graph` and the entry point used
+    by the backend at startup, so that the routing engine operates on the
+    preprocessed network without contacting OpenStreetMap.
+
+    Parameters
+    ----------
+    input_path:
+        Path of the pickle file holding the processed graph.
+
+    Returns
+    -------
+    networkx.MultiDiGraph
+        The deserialized graph, strongly connected and carrying "speed_kph"
+        and "travel_time" edge attributes.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the pickle file does not exist, meaning this module has not been
+        executed yet to generate it.
+    """
+    if not input_path.is_file():
+        message = (
+            f"Processed graph not found at {input_path}. Run this module as a script "
+            "to download, process and serialize the street network first."
+        )
+        raise FileNotFoundError(message)
+
+    with input_path.open("rb") as processed_graph_file:
+        street_network_graph: nx.MultiDiGraph = pickle.load(processed_graph_file)
+
+    return street_network_graph
 
 
 def build_interactive_map(street_network_graph: nx.MultiDiGraph) -> folium.Map:
