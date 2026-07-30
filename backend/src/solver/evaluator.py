@@ -21,6 +21,15 @@ module never performs a graph traversal and its cost grows only with the
 number of stops on a route, not with the size of the underlying street
 network. This is what allows a metaheuristic to call `evaluate_state` millions
 of times during a search.
+
+The clock simulation itself lives in `simulate_route_clock`, a single shared
+core that both `evaluate_route` (which additionally builds the full per-stop
+`RouteStopVisit` timeline) and `evaluate_route_cost` (a leaner, allocation-free
+path that returns only the resulting weighted scalar) are built on. The latter
+exists for the Tabu Search metaheuristic (`solver.metaheuristic`), which must
+re-cost arbitrary candidate routes many thousands of times per search and
+cannot afford to allocate a `RouteEvaluation` and a `RouteStopVisit` per stop
+on every candidate it merely discards a moment later.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from ..domain.entities import Route, UnknownVehicleError, VRPState, WorkdayInstance
+from ..domain.entities import Route, UnknownVehicleError, Vehicle, VRPState, WorkdayInstance
 from ..topology.matrix import CostMatrix
 
 
@@ -279,18 +288,230 @@ def _depot_stop_visit(node_id: int, clock_seconds: float) -> RouteStopVisit:
     )
 
 
-def evaluate_route(route: Route, workday: WorkdayInstance, cost_matrix: CostMatrix) -> RouteEvaluation:
+@dataclass(frozen=True, slots=True)
+class RouteClockSimulation:
     """
-    Simulate a single route's workday clock using only O(1) matrix lookups.
+    Raw aggregate result of simulating a route's workday clock.
 
-    The simulation walks `route.full_node_sequence` leg by leg. For every
-    leg it: inserts a mandatory EU rest break if driving the leg would push
-    continuous driving time past `Vehicle.max_continuous_driving_seconds`;
+    This intentionally excludes capacity accounting (`total_demand`,
+    `capacity_excess`), since those depend only on the set of customers
+    visited, not on the clock simulation, and are computed separately by
+    every caller of `simulate_route_clock`.
+
+    Attributes
+    ----------
+    total_travel_time_seconds:
+        Sum of the driving time of every leg. Positive infinity if any leg is
+        unreachable.
+    total_distance_meters:
+        Sum of the driving distance of every leg. Positive infinity under the
+        same condition as `total_travel_time_seconds`.
+    total_waiting_seconds:
+        Sum of the idle time spent waiting for a time window to open.
+    total_service_time_seconds:
+        Sum of every visited customer's `Customer.service_time_seconds`.
+    total_break_seconds:
+        Total time spent on mandatory EU rest breaks.
+    total_lateness_seconds:
+        Sum of the soft time window lateness penalty basis.
+    mandatory_breaks_taken:
+        Number of mandatory rest breaks the route required.
+    is_reachable:
+        Whether every leg of the route has a finite cost.
+    route_duration_seconds:
+        Total elapsed workday clock, driving, waiting, service and rest
+        breaks combined. Positive infinity if the route is not reachable.
+    stop_schedule:
+        Per-stop timeline, depot included at both ends, in visiting order, or
+        `None` if the simulation was run with `build_schedule=False`.
+    """
+
+    total_travel_time_seconds: float
+    total_distance_meters: float
+    total_waiting_seconds: float
+    total_service_time_seconds: float
+    total_break_seconds: float
+    total_lateness_seconds: float
+    mandatory_breaks_taken: int
+    is_reachable: bool
+    route_duration_seconds: float
+    stop_schedule: tuple[RouteStopVisit, ...] | None
+
+
+def simulate_route_clock(
+    customer_sequence: tuple[int, ...],
+    vehicle: Vehicle,
+    workday: WorkdayInstance,
+    cost_matrix: CostMatrix,
+    build_schedule: bool = True,
+) -> RouteClockSimulation:
+    """
+    Simulate a route's workday clock leg by leg using only O(1) matrix lookups.
+
+    This is the single, shared clock simulation core: `evaluate_route` calls
+    it with `build_schedule=True` to expose the full per-stop timeline as
+    part of its public `RouteEvaluation`, and `evaluate_route_cost` calls it
+    with `build_schedule=False` for a faster, allocation-free path used by
+    the Tabu Search metaheuristic while scanning candidate moves. Defining
+    the EU rest break, time window and service time rules once here, instead
+    of restating them in every consumer, is what keeps them consistent as the
+    solver grows.
+
+    The simulation walks the depot-to-depot node sequence leg by leg. For
+    every leg it: inserts a mandatory EU rest break if driving the leg would
+    push continuous driving time past `Vehicle.max_continuous_driving_seconds`;
     advances the clock by the leg's travel time; at a customer, makes the
     vehicle wait if it arrived before `TimeWindow.start_seconds`, or accrues
     a soft lateness penalty basis if it arrived after `TimeWindow.end_seconds`;
     and finally advances the clock by the customer's `service_time_seconds`
     before moving on to the next leg.
+
+    Parameters
+    ----------
+    customer_sequence:
+        Ordered tuple of customer node identifiers, depot excluded, exactly
+        as stored by `Route.customer_sequence`.
+    vehicle:
+        Vehicle driving the route.
+    workday:
+        Problem instance the customers belong to.
+    cost_matrix:
+        Precomputed cost matrix whose nodes of interest cover the depot and
+        every customer in `customer_sequence`.
+    build_schedule:
+        Whether to build and return the full per-stop `RouteStopVisit`
+        timeline. Disable for a faster simulation, free of per-stop
+        allocations, when only the aggregate totals are needed.
+
+    Returns
+    -------
+    RouteClockSimulation
+        Raw aggregate totals of the simulated clock, and the per-stop
+        timeline if `build_schedule` is True, otherwise `None`.
+    """
+    depot_node = cost_matrix.depot_node
+    full_node_sequence = (depot_node, *customer_sequence, depot_node)
+    final_leg_index = len(full_node_sequence) - 2
+
+    clock_seconds = 0.0
+    continuous_driving_seconds = 0.0
+    total_travel_time_seconds = 0.0
+    total_distance_meters = 0.0
+    total_waiting_seconds = 0.0
+    total_service_time_seconds = 0.0
+    total_break_seconds = 0.0
+    total_lateness_seconds = 0.0
+    mandatory_breaks_taken = 0
+    is_reachable = True
+
+    stop_schedule: list[RouteStopVisit] | None = (
+        [_depot_stop_visit(depot_node, clock_seconds)] if build_schedule else None
+    )
+
+    for leg_index in range(final_leg_index + 1):
+        origin_node = full_node_sequence[leg_index]
+        destination_node = full_node_sequence[leg_index + 1]
+
+        leg_travel_time_seconds = cost_matrix.travel_time_between(origin_node, destination_node)
+        leg_distance_meters = cost_matrix.distance_between(origin_node, destination_node)
+
+        if not math.isfinite(leg_travel_time_seconds) or not math.isfinite(leg_distance_meters):
+            # The remainder of the route cannot be physically driven, so the
+            # simulation stops here rather than producing a misleading
+            # partial timeline for stops that would never be reached.
+            is_reachable = False
+            break
+
+        if continuous_driving_seconds + leg_travel_time_seconds > vehicle.max_continuous_driving_seconds:
+            break_seconds = vehicle.mandatory_break_seconds
+            clock_seconds += break_seconds
+            continuous_driving_seconds = 0.0
+            total_break_seconds += break_seconds
+            mandatory_breaks_taken += 1
+            if stop_schedule is not None:
+                # The break is taken at the stop the vehicle is departing
+                # from, so the previously recorded visit is amended
+                # retroactively; the record is frozen, hence the
+                # replace-and-reassign pattern.
+                stop_schedule[-1] = replace(
+                    stop_schedule[-1],
+                    break_seconds_before_departure=break_seconds,
+                    departure_time_seconds=stop_schedule[-1].departure_time_seconds + break_seconds,
+                )
+
+        clock_seconds += leg_travel_time_seconds
+        continuous_driving_seconds += leg_travel_time_seconds
+        total_travel_time_seconds += leg_travel_time_seconds
+        total_distance_meters += leg_distance_meters
+
+        arrival_time_seconds = clock_seconds
+        is_final_depot_return = leg_index == final_leg_index
+
+        waiting_seconds = 0.0
+        lateness_seconds = 0.0
+        service_time_seconds = 0.0
+
+        if not is_final_depot_return:
+            customer = workday.customers_by_node_id[destination_node]
+
+            if arrival_time_seconds < customer.time_window.start_seconds:
+                waiting_seconds = customer.time_window.start_seconds - arrival_time_seconds
+                clock_seconds += waiting_seconds
+                total_waiting_seconds += waiting_seconds
+            elif arrival_time_seconds > customer.time_window.end_seconds:
+                lateness_seconds = arrival_time_seconds - customer.time_window.end_seconds
+                total_lateness_seconds += lateness_seconds
+
+            service_time_seconds = customer.service_time_seconds
+            clock_seconds += service_time_seconds
+            total_service_time_seconds += service_time_seconds
+
+        if stop_schedule is not None:
+            stop_schedule.append(
+                RouteStopVisit(
+                    node_id=destination_node,
+                    arrival_time_seconds=arrival_time_seconds,
+                    waiting_seconds=waiting_seconds,
+                    lateness_seconds=lateness_seconds,
+                    service_time_seconds=service_time_seconds,
+                    break_seconds_before_departure=0.0,
+                    departure_time_seconds=clock_seconds,
+                )
+            )
+
+    if is_reachable:
+        route_duration_seconds = clock_seconds
+    else:
+        # An unreachable route has no well-defined duration; treating it as
+        # infinite keeps it consistent with the infinite travel time and
+        # distance below, instead of reporting a partial, meaningless value.
+        total_travel_time_seconds = math.inf
+        total_distance_meters = math.inf
+        route_duration_seconds = math.inf
+
+    return RouteClockSimulation(
+        total_travel_time_seconds=total_travel_time_seconds,
+        total_distance_meters=total_distance_meters,
+        total_waiting_seconds=total_waiting_seconds,
+        total_service_time_seconds=total_service_time_seconds,
+        total_break_seconds=total_break_seconds,
+        total_lateness_seconds=total_lateness_seconds,
+        mandatory_breaks_taken=mandatory_breaks_taken,
+        is_reachable=is_reachable,
+        route_duration_seconds=route_duration_seconds,
+        stop_schedule=tuple(stop_schedule) if stop_schedule is not None else None,
+    )
+
+
+def evaluate_route(route: Route, workday: WorkdayInstance, cost_matrix: CostMatrix) -> RouteEvaluation:
+    """
+    Evaluate a single route's full cost, capacity and timeline breakdown.
+
+    The clock simulation itself is delegated to `simulate_route_clock`; this
+    function additionally resolves the route's vehicle, computes the
+    capacity excess (independent of the clock) and the workday excess
+    (derived from the simulated route duration), and packages everything
+    into a `RouteEvaluation`.
 
     Parameters
     ----------
@@ -322,118 +543,92 @@ def evaluate_route(route: Route, workday: WorkdayInstance, cost_matrix: CostMatr
     total_demand = route.total_demand(workday.customers_by_node_id)
     capacity_excess = max(0.0, total_demand - vehicle.max_capacity)
 
-    depot_node = cost_matrix.depot_node
-    full_node_sequence = route.full_node_sequence(depot_node)
-    final_leg_index = len(full_node_sequence) - 2
+    simulation = simulate_route_clock(
+        route.customer_sequence, vehicle, workday, cost_matrix, build_schedule=True
+    )
 
-    clock_seconds = 0.0
-    continuous_driving_seconds = 0.0
-    total_travel_time_seconds = 0.0
-    total_distance_meters = 0.0
-    total_waiting_seconds = 0.0
-    total_service_time_seconds = 0.0
-    total_break_seconds = 0.0
-    total_lateness_seconds = 0.0
-    mandatory_breaks_taken = 0
-    is_reachable = True
-
-    stop_schedule: list[RouteStopVisit] = [_depot_stop_visit(depot_node, clock_seconds)]
-
-    for leg_index in range(final_leg_index + 1):
-        origin_node = full_node_sequence[leg_index]
-        destination_node = full_node_sequence[leg_index + 1]
-
-        leg_travel_time_seconds = cost_matrix.travel_time_between(origin_node, destination_node)
-        leg_distance_meters = cost_matrix.distance_between(origin_node, destination_node)
-
-        if not math.isfinite(leg_travel_time_seconds) or not math.isfinite(leg_distance_meters):
-            # The remainder of the route cannot be physically driven, so the
-            # simulation stops here rather than producing a misleading
-            # partial timeline for stops that would never be reached.
-            is_reachable = False
-            break
-
-        if continuous_driving_seconds + leg_travel_time_seconds > vehicle.max_continuous_driving_seconds:
-            break_seconds = vehicle.mandatory_break_seconds
-            clock_seconds += break_seconds
-            continuous_driving_seconds = 0.0
-            total_break_seconds += break_seconds
-            mandatory_breaks_taken += 1
-            # The break is taken at the stop the vehicle is departing from,
-            # so the previously recorded visit is amended retroactively; the
-            # record is frozen, hence the replace-and-reassign pattern.
-            stop_schedule[-1] = replace(
-                stop_schedule[-1],
-                break_seconds_before_departure=break_seconds,
-                departure_time_seconds=stop_schedule[-1].departure_time_seconds + break_seconds,
-            )
-
-        clock_seconds += leg_travel_time_seconds
-        continuous_driving_seconds += leg_travel_time_seconds
-        total_travel_time_seconds += leg_travel_time_seconds
-        total_distance_meters += leg_distance_meters
-
-        arrival_time_seconds = clock_seconds
-        is_final_depot_return = leg_index == final_leg_index
-
-        waiting_seconds = 0.0
-        lateness_seconds = 0.0
-        service_time_seconds = 0.0
-
-        if not is_final_depot_return:
-            customer = workday.customers_by_node_id[destination_node]
-
-            if arrival_time_seconds < customer.time_window.start_seconds:
-                waiting_seconds = customer.time_window.start_seconds - arrival_time_seconds
-                clock_seconds += waiting_seconds
-                total_waiting_seconds += waiting_seconds
-            elif arrival_time_seconds > customer.time_window.end_seconds:
-                lateness_seconds = arrival_time_seconds - customer.time_window.end_seconds
-                total_lateness_seconds += lateness_seconds
-
-            service_time_seconds = customer.service_time_seconds
-            clock_seconds += service_time_seconds
-            total_service_time_seconds += service_time_seconds
-
-        stop_schedule.append(
-            RouteStopVisit(
-                node_id=destination_node,
-                arrival_time_seconds=arrival_time_seconds,
-                waiting_seconds=waiting_seconds,
-                lateness_seconds=lateness_seconds,
-                service_time_seconds=service_time_seconds,
-                break_seconds_before_departure=0.0,
-                departure_time_seconds=clock_seconds,
-            )
-        )
-
-    if is_reachable:
-        route_duration_seconds = clock_seconds
-        workday_excess_seconds = max(0.0, route_duration_seconds - vehicle.max_workday_seconds)
+    if simulation.is_reachable:
+        workday_excess_seconds = max(0.0, simulation.route_duration_seconds - vehicle.max_workday_seconds)
     else:
-        # An unreachable route has no well-defined duration; treating it as
-        # infinite keeps it consistent with the infinite travel time and
-        # distance below, instead of reporting a partial, meaningless value.
-        total_travel_time_seconds = math.inf
-        total_distance_meters = math.inf
-        route_duration_seconds = math.inf
         workday_excess_seconds = math.inf
+
+    assert simulation.stop_schedule is not None  # build_schedule=True guarantees this
 
     return RouteEvaluation(
         vehicle_id=route.vehicle_id,
-        travel_time_seconds=total_travel_time_seconds,
-        distance_meters=total_distance_meters,
+        travel_time_seconds=simulation.total_travel_time_seconds,
+        distance_meters=simulation.total_distance_meters,
         total_demand=total_demand,
         capacity_excess=capacity_excess,
-        is_reachable=is_reachable,
-        waiting_time_seconds=total_waiting_seconds,
-        service_time_seconds=total_service_time_seconds,
-        break_time_seconds=total_break_seconds,
-        mandatory_breaks_taken=mandatory_breaks_taken,
-        time_window_lateness_seconds=total_lateness_seconds,
-        route_duration_seconds=route_duration_seconds,
+        is_reachable=simulation.is_reachable,
+        waiting_time_seconds=simulation.total_waiting_seconds,
+        service_time_seconds=simulation.total_service_time_seconds,
+        break_time_seconds=simulation.total_break_seconds,
+        mandatory_breaks_taken=simulation.mandatory_breaks_taken,
+        time_window_lateness_seconds=simulation.total_lateness_seconds,
+        route_duration_seconds=simulation.route_duration_seconds,
         workday_excess_seconds=workday_excess_seconds,
-        stop_schedule=tuple(stop_schedule),
+        stop_schedule=simulation.stop_schedule,
+    )
+
+
+def evaluate_route_cost(
+    customer_sequence: tuple[int, ...],
+    vehicle: Vehicle,
+    workday: WorkdayInstance,
+    cost_matrix: CostMatrix,
+    weights: EvaluationWeights,
+) -> float:
+    """
+    Return the weighted cost of an arbitrary candidate route, cheaply.
+
+    This is the fast path a local search metaheuristic should use while
+    scanning candidate moves: it calls `simulate_route_clock` with
+    `build_schedule=False`, so no `RouteStopVisit` timeline or
+    `RouteEvaluation` is ever allocated for a candidate that may be
+    discarded a moment later, and folds the result into the exact same
+    weighted formula `evaluate_state` uses for a single route's
+    contribution to f(S). It is not a substitute for `evaluate_route`:
+    callers that need the per-stop timeline or the full capacity/timeline
+    breakdown should use that function instead.
+
+    Parameters
+    ----------
+    customer_sequence:
+        Candidate ordered tuple of customer node identifiers for the route,
+        depot excluded.
+    vehicle:
+        Vehicle that would drive this route.
+    workday:
+        Problem instance the customers belong to.
+    cost_matrix:
+        Precomputed cost matrix providing O(1) travel time and distance
+        lookups.
+    weights:
+        Weights combining travel time, distance and the time window,
+        capacity and workday penalties into a single scalar.
+
+    Returns
+    -------
+    float
+        The weighted cost of the route, or positive infinity if any leg of
+        the route is currently unreachable.
+    """
+    simulation = simulate_route_clock(customer_sequence, vehicle, workday, cost_matrix, build_schedule=False)
+
+    if not simulation.is_reachable:
+        return math.inf
+
+    total_demand = sum(workday.customers_by_node_id[node_id].demand for node_id in customer_sequence)
+    capacity_excess = max(0.0, total_demand - vehicle.max_capacity)
+    workday_excess_seconds = max(0.0, simulation.route_duration_seconds - vehicle.max_workday_seconds)
+
+    return (
+        weights.time_weight * simulation.total_travel_time_seconds
+        + weights.distance_weight * simulation.total_distance_meters
+        + weights.time_window_penalty_weight * simulation.total_lateness_seconds
+        + weights.capacity_penalty_weight * capacity_excess
+        + weights.workday_penalty_weight * workday_excess_seconds
     )
 
 
