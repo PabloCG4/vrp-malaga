@@ -85,7 +85,7 @@ class _RouteUnderConstruction:
     vehicle:
         Vehicle driving this route.
     customer_sequence:
-        Customers appended so far, in visiting order.
+        Customer identifiers appended so far, in visiting order.
     last_node:
         Graph node identifier the vehicle would currently be departing from:
         the depot until the first customer is appended, the most recently
@@ -101,7 +101,7 @@ class _RouteUnderConstruction:
     """
 
     vehicle: Vehicle
-    customer_sequence: list[int] = field(default_factory=list)
+    customer_sequence: list[str] = field(default_factory=list)
     last_node: int = 0
     total_demand: float = 0.0
     clock_seconds: float = 0.0
@@ -246,7 +246,7 @@ def build_initial_state(
     Every workday customer is assigned to exactly one route, so the returned
     state always satisfies `VRPState.validate_customer_coverage` by
     construction. Vehicles are considered in `workday.fleet` order and
-    unassigned customers in ascending node identifier order whenever more
+    unassigned customers in ascending customer identifier order whenever more
     than one candidate ties on cost, which makes the result fully
     deterministic for a given workday, cost matrix and weight configuration.
 
@@ -291,28 +291,28 @@ def build_initial_state(
         vehicle.vehicle_id: _RouteUnderConstruction(vehicle=vehicle, last_node=depot_node)
         for vehicle in workday.fleet
     }
-    unassigned_node_ids = sorted(workday.customer_node_ids)
+    unassigned_customer_ids = sorted(workday.customer_ids)
 
-    while unassigned_node_ids:
+    while unassigned_customer_ids:
         best_marginal_cost = math.inf
         best_vehicle_id: str | None = None
-        best_customer_node_id: int | None = None
+        best_customer_id: str | None = None
         best_outcome: _AppendOutcome | None = None
 
         for vehicle in workday.fleet:
             route = routes_under_construction[vehicle.vehicle_id]
 
-            for customer_node_id in unassigned_node_ids:
-                customer = workday.customers_by_node_id[customer_node_id]
+            for customer_id in unassigned_customer_ids:
+                customer = workday.customers_by_id[customer_id]
                 outcome = _evaluate_append(route, customer, vehicle, cost_matrix, weights)
 
                 if best_outcome is None or outcome.marginal_cost < best_marginal_cost:
                     best_marginal_cost = outcome.marginal_cost
                     best_vehicle_id = vehicle.vehicle_id
-                    best_customer_node_id = customer_node_id
+                    best_customer_id = customer_id
                     best_outcome = outcome
 
-        if best_outcome is None or best_vehicle_id is None or best_customer_node_id is None:
+        if best_outcome is None or best_vehicle_id is None or best_customer_id is None:
             message = (
                 "No append candidate was found despite a non-empty fleet and unassigned "
                 "customers; this indicates an internal invariant violation."
@@ -320,13 +320,13 @@ def build_initial_state(
             raise ConstructiveHeuristicError(message)
 
         chosen_route = routes_under_construction[best_vehicle_id]
-        chosen_route.customer_sequence.append(best_customer_node_id)
+        chosen_route.customer_sequence.append(best_customer_id)
         chosen_route.last_node = best_outcome.new_last_node
         chosen_route.clock_seconds = best_outcome.new_clock_seconds
         chosen_route.continuous_driving_seconds = best_outcome.new_continuous_driving_seconds
-        chosen_route.total_demand += workday.customers_by_node_id[best_customer_node_id].demand
+        chosen_route.total_demand += workday.customers_by_id[best_customer_id].demand
 
-        unassigned_node_ids.remove(best_customer_node_id)
+        unassigned_customer_ids.remove(best_customer_id)
 
     routes = tuple(
         Route(vehicle_id=vehicle.vehicle_id, customer_sequence=tuple(routes_under_construction[vehicle.vehicle_id].customer_sequence))

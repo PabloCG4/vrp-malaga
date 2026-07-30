@@ -22,6 +22,12 @@ number of stops on a route, not with the size of the underlying street
 network. This is what allows a metaheuristic to call `evaluate_state` millions
 of times during a search.
 
+The clock simulation also enforces precedence for mid-day pickup-and-delivery
+pairs (see `backend/src/domain/entities.py`'s `Customer.paired_customer_id`):
+if a route visits a delivery stop before its paired pickup stop has been
+visited by the same vehicle, a precedence violation is recorded and priced as
+a hard penalty, exactly like the existing capacity and workday penalties.
+
 The clock simulation itself lives in `simulate_route_clock`, a single shared
 core that both `evaluate_route` (which additionally builds the full per-stop
 `RouteStopVisit` timeline) and `evaluate_route_cost` (a leaner, allocation-free
@@ -53,18 +59,20 @@ class EvaluationWeights:
              + time_window_penalty_weight * total_time_window_lateness_seconds
              + capacity_penalty_weight * total_capacity_excess
              + workday_penalty_weight * total_workday_excess_seconds
+             + precedence_penalty_weight * total_precedence_violations
 
     The base objectives (time, distance) are ordinary economic costs. The
     time window penalty is deliberately moderate: a late delivery degrades
     service quality but remains a legal, physically feasible outcome, so it
     should discourage lateness without dominating every other consideration.
-    The capacity and workday penalties, in contrast, default to a value
-    several orders of magnitude larger than the others, so that, for any two
-    states with a finite cost, one that respects both hard constraints is
-    always cheaper than one that does not, regardless of how much shorter or
-    faster the infeasible one might be. This is what makes a metaheuristic
-    minimizing `total_cost` naturally reject overloaded vehicles and workdays
-    that overrun EU driving regulations, rather than trade a small amount of
+    The capacity, workday and precedence penalties, in contrast, default to a
+    value several orders of magnitude larger than the others, so that, for
+    any two states with a finite cost, one that respects every hard
+    constraint is always cheaper than one that does not, regardless of how
+    much shorter or faster the infeasible one might be. This is what makes a
+    metaheuristic minimizing `total_cost` naturally reject overloaded
+    vehicles, workdays that overrun EU driving regulations, and pickups
+    visited after their paired delivery, rather than trade a small amount of
     violation for a large amount of saved time.
 
     Attributes
@@ -85,6 +93,14 @@ class EvaluationWeights:
         Hard penalty weight applied to the total number of seconds every
         route's full duration (driving, waiting, service and breaks included)
         exceeds its vehicle's `max_workday_seconds`.
+    precedence_penalty_weight:
+        Hard penalty weight applied to the number of pickup-and-delivery
+        pairs visited out of order (delivery reached before its paired
+        pickup, whether on the same route or split across two routes). Kept
+        finite, at the same order of magnitude as the capacity and workday
+        penalties, so that Tabu Search retains a gradient towards a corrected
+        sequence instead of facing an indistinguishable infinite cost for
+        every infeasible candidate.
     """
 
     time_weight: float = 1.0
@@ -92,6 +108,7 @@ class EvaluationWeights:
     time_window_penalty_weight: float = 5.0
     capacity_penalty_weight: float = 100000.0
     workday_penalty_weight: float = 100000.0
+    precedence_penalty_weight: float = 100000.0
 
     def __post_init__(self) -> None:
         for weight_name, weight_value in (
@@ -100,6 +117,7 @@ class EvaluationWeights:
             ("time_window_penalty_weight", self.time_window_penalty_weight),
             ("capacity_penalty_weight", self.capacity_penalty_weight),
             ("workday_penalty_weight", self.workday_penalty_weight),
+            ("precedence_penalty_weight", self.precedence_penalty_weight),
         ):
             if weight_value < 0.0:
                 message = (
@@ -122,6 +140,13 @@ class RouteStopVisit:
     ----------
     node_id:
         Graph node identifier of this stop.
+    customer_id:
+        Identifier of the customer served at this stop (`Customer.customer_id`),
+        or `None` for the synthetic depot entries at both ends of the
+        schedule. Distinct from `node_id` so that a consumer such as
+        `FleetTracker` can map a scheduled stop back to a specific logical
+        customer even when several stops share the same physical node, as
+        happens with pickup-and-delivery pairs.
     arrival_time_seconds:
         Workday clock reading when the vehicle reaches this node, immediately
         after driving the incoming leg (and after any rest break taken
@@ -148,6 +173,7 @@ class RouteStopVisit:
     """
 
     node_id: int
+    customer_id: str | None
     arrival_time_seconds: float
     waiting_seconds: float
     lateness_seconds: float
@@ -200,6 +226,13 @@ class RouteEvaluation:
     workday_excess_seconds:
         Amount by which `route_duration_seconds` exceeds the vehicle's
         `max_workday_seconds`, or zero if the route respects it.
+    precedence_violations:
+        Number of pickup-and-delivery pairs whose delivery stop this route
+        visits before its paired pickup stop has been visited by this same
+        vehicle.
+    violating_customer_ids:
+        Customer identifiers of the delivery stops responsible for
+        `precedence_violations`, for telemetry and debugging.
     stop_schedule:
         Per-stop timeline of the route, depot included at both ends, in
         visiting order.
@@ -218,6 +251,8 @@ class RouteEvaluation:
     time_window_lateness_seconds: float
     route_duration_seconds: float
     workday_excess_seconds: float
+    precedence_violations: int
+    violating_customer_ids: tuple[str, ...]
     stop_schedule: tuple[RouteStopVisit, ...]
 
     @property
@@ -229,6 +264,11 @@ class RouteEvaluation:
     def respects_workday_duration(self) -> bool:
         """Return whether this route stays within its vehicle's workday budget."""
         return self.workday_excess_seconds <= 0.0
+
+    @property
+    def respects_precedence(self) -> bool:
+        """Return whether every pickup-and-delivery pair on this route is in order."""
+        return self.precedence_violations <= 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,13 +294,16 @@ class StateEvaluation:
         route.
     total_workday_excess_seconds:
         Sum of `RouteEvaluation.workday_excess_seconds` across every route.
+    total_precedence_violations:
+        Sum of `RouteEvaluation.precedence_violations` across every route.
     is_feasible:
-        True only if every route is reachable and respects both its
-        vehicle's capacity and its vehicle's maximum workday duration. Soft
-        time window lateness never makes a state infeasible, only more
-        expensive. A metaheuristic may still choose to accept an infeasible
-        state transiently, guided by the finite penalty embedded in
-        `total_cost`, but should never report one as a final solution.
+        True only if every route is reachable and respects its vehicle's
+        capacity, its vehicle's maximum workday duration, and every
+        pickup-and-delivery precedence constraint. Soft time window lateness
+        never makes a state infeasible, only more expensive. A metaheuristic
+        may still choose to accept an infeasible state transiently, guided by
+        the finite penalty embedded in `total_cost`, but should never report
+        one as a final solution.
     route_evaluations:
         Per-route breakdown, in the same order as `VRPState.routes`.
     """
@@ -271,6 +314,7 @@ class StateEvaluation:
     total_capacity_excess: float
     total_time_window_lateness_seconds: float
     total_workday_excess_seconds: float
+    total_precedence_violations: int
     is_feasible: bool
     route_evaluations: tuple[RouteEvaluation, ...]
 
@@ -279,6 +323,7 @@ def _depot_stop_visit(node_id: int, clock_seconds: float) -> RouteStopVisit:
     """Build the zero-activity `RouteStopVisit` record for a depot visit."""
     return RouteStopVisit(
         node_id=node_id,
+        customer_id=None,
         arrival_time_seconds=clock_seconds,
         waiting_seconds=0.0,
         lateness_seconds=0.0,
@@ -321,6 +366,12 @@ class RouteClockSimulation:
     route_duration_seconds:
         Total elapsed workday clock, driving, waiting, service and rest
         breaks combined. Positive infinity if the route is not reachable.
+    precedence_violations:
+        Number of paired delivery stops visited before their pickup stop was
+        visited by this same route.
+    violating_customer_ids:
+        Customer identifiers of the delivery stops responsible for
+        `precedence_violations`.
     stop_schedule:
         Per-stop timeline, depot included at both ends, in visiting order, or
         `None` if the simulation was run with `build_schedule=False`.
@@ -335,11 +386,13 @@ class RouteClockSimulation:
     mandatory_breaks_taken: int
     is_reachable: bool
     route_duration_seconds: float
+    precedence_violations: int
+    violating_customer_ids: tuple[str, ...]
     stop_schedule: tuple[RouteStopVisit, ...] | None
 
 
 def simulate_route_clock(
-    customer_sequence: tuple[int, ...],
+    customer_sequence: tuple[str, ...],
     vehicle: Vehicle,
     workday: WorkdayInstance,
     cost_matrix: CostMatrix,
@@ -353,24 +406,28 @@ def simulate_route_clock(
     part of its public `RouteEvaluation`, and `evaluate_route_cost` calls it
     with `build_schedule=False` for a faster, allocation-free path used by
     the Tabu Search metaheuristic while scanning candidate moves. Defining
-    the EU rest break, time window and service time rules once here, instead
-    of restating them in every consumer, is what keeps them consistent as the
-    solver grows.
+    the EU rest break, time window, service time and precedence rules once
+    here, instead of restating them in every consumer, is what keeps them
+    consistent as the solver grows.
 
-    The simulation walks the depot-to-depot node sequence leg by leg. For
-    every leg it: inserts a mandatory EU rest break if driving the leg would
-    push continuous driving time past `Vehicle.max_continuous_driving_seconds`;
+    The simulation walks the depot-to-depot customer sequence leg by leg,
+    resolving each customer identifier to its physical node via
+    `workday.customers_by_id` for the matrix lookups. For every leg it:
+    inserts a mandatory EU rest break if driving the leg would push
+    continuous driving time past `Vehicle.max_continuous_driving_seconds`;
     advances the clock by the leg's travel time; at a customer, makes the
     vehicle wait if it arrived before `TimeWindow.start_seconds`, or accrues
     a soft lateness penalty basis if it arrived after `TimeWindow.end_seconds`;
-    and finally advances the clock by the customer's `service_time_seconds`
-    before moving on to the next leg.
+    advances the clock by the customer's `service_time_seconds` before moving
+    on to the next leg; and, if the customer is the delivery side of a
+    pickup-and-delivery pair, checks whether its paired pickup has already
+    been visited by this same route, recording a precedence violation if not.
 
     Parameters
     ----------
     customer_sequence:
-        Ordered tuple of customer node identifiers, depot excluded, exactly
-        as stored by `Route.customer_sequence`.
+        Ordered tuple of customer identifiers, depot excluded, exactly as
+        stored by `Route.customer_sequence`.
     vehicle:
         Vehicle driving the route.
     workday:
@@ -390,8 +447,8 @@ def simulate_route_clock(
         timeline if `build_schedule` is True, otherwise `None`.
     """
     depot_node = cost_matrix.depot_node
-    full_node_sequence = (depot_node, *customer_sequence, depot_node)
-    final_leg_index = len(full_node_sequence) - 2
+    full_customer_sequence: tuple[str | None, ...] = (None, *customer_sequence, None)
+    final_leg_index = len(full_customer_sequence) - 2
 
     clock_seconds = 0.0
     continuous_driving_seconds = 0.0
@@ -403,14 +460,24 @@ def simulate_route_clock(
     total_lateness_seconds = 0.0
     mandatory_breaks_taken = 0
     is_reachable = True
+    precedence_violations = 0
+    violating_customer_ids: list[str] = []
+    visited_customer_ids: set[str] = set()
 
     stop_schedule: list[RouteStopVisit] | None = (
         [_depot_stop_visit(depot_node, clock_seconds)] if build_schedule else None
     )
 
     for leg_index in range(final_leg_index + 1):
-        origin_node = full_node_sequence[leg_index]
-        destination_node = full_node_sequence[leg_index + 1]
+        origin_customer_id = full_customer_sequence[leg_index]
+        destination_customer_id = full_customer_sequence[leg_index + 1]
+
+        origin_node = depot_node if origin_customer_id is None else workday.customers_by_id[origin_customer_id].node_id
+        destination_node = (
+            depot_node
+            if destination_customer_id is None
+            else workday.customers_by_id[destination_customer_id].node_id
+        )
 
         leg_travel_time_seconds = cost_matrix.travel_time_between(origin_node, destination_node)
         leg_distance_meters = cost_matrix.distance_between(origin_node, destination_node)
@@ -452,7 +519,8 @@ def simulate_route_clock(
         service_time_seconds = 0.0
 
         if not is_final_depot_return:
-            customer = workday.customers_by_node_id[destination_node]
+            assert destination_customer_id is not None
+            customer = workday.customers_by_id[destination_customer_id]
 
             if arrival_time_seconds < customer.time_window.start_seconds:
                 waiting_seconds = customer.time_window.start_seconds - arrival_time_seconds
@@ -466,10 +534,18 @@ def simulate_route_clock(
             clock_seconds += service_time_seconds
             total_service_time_seconds += service_time_seconds
 
+            is_delivery_leg = customer.paired_customer_id is not None and not customer.is_pickup_stop
+            if is_delivery_leg and customer.paired_customer_id not in visited_customer_ids:
+                precedence_violations += 1
+                violating_customer_ids.append(destination_customer_id)
+
+            visited_customer_ids.add(destination_customer_id)
+
         if stop_schedule is not None:
             stop_schedule.append(
                 RouteStopVisit(
                     node_id=destination_node,
+                    customer_id=destination_customer_id,
                     arrival_time_seconds=arrival_time_seconds,
                     waiting_seconds=waiting_seconds,
                     lateness_seconds=lateness_seconds,
@@ -499,6 +575,8 @@ def simulate_route_clock(
         mandatory_breaks_taken=mandatory_breaks_taken,
         is_reachable=is_reachable,
         route_duration_seconds=route_duration_seconds,
+        precedence_violations=precedence_violations,
+        violating_customer_ids=tuple(violating_customer_ids),
         stop_schedule=tuple(stop_schedule) if stop_schedule is not None else None,
     )
 
@@ -533,14 +611,14 @@ def evaluate_route(route: Route, workday: WorkdayInstance, cost_matrix: CostMatr
     UnknownVehicleError
         If the route references a vehicle absent from the workday fleet.
     UnknownCustomerError
-        If the route visits a node that is not a workday customer.
+        If the route visits a customer that is not part of the workday.
     """
     vehicle = workday.fleet_by_vehicle_id.get(route.vehicle_id)
     if vehicle is None:
         message = f"Route references vehicle '{route.vehicle_id}', which is not part of the fleet."
         raise UnknownVehicleError(message)
 
-    total_demand = route.total_demand(workday.customers_by_node_id)
+    total_demand = route.total_demand(workday.customers_by_id)
     capacity_excess = max(0.0, total_demand - vehicle.max_capacity)
 
     simulation = simulate_route_clock(
@@ -568,12 +646,14 @@ def evaluate_route(route: Route, workday: WorkdayInstance, cost_matrix: CostMatr
         time_window_lateness_seconds=simulation.total_lateness_seconds,
         route_duration_seconds=simulation.route_duration_seconds,
         workday_excess_seconds=workday_excess_seconds,
+        precedence_violations=simulation.precedence_violations,
+        violating_customer_ids=simulation.violating_customer_ids,
         stop_schedule=simulation.stop_schedule,
     )
 
 
 def evaluate_route_cost(
-    customer_sequence: tuple[int, ...],
+    customer_sequence: tuple[str, ...],
     vehicle: Vehicle,
     workday: WorkdayInstance,
     cost_matrix: CostMatrix,
@@ -595,8 +675,8 @@ def evaluate_route_cost(
     Parameters
     ----------
     customer_sequence:
-        Candidate ordered tuple of customer node identifiers for the route,
-        depot excluded.
+        Candidate ordered tuple of customer identifiers for the route, depot
+        excluded.
     vehicle:
         Vehicle that would drive this route.
     workday:
@@ -606,7 +686,7 @@ def evaluate_route_cost(
         lookups.
     weights:
         Weights combining travel time, distance and the time window,
-        capacity and workday penalties into a single scalar.
+        capacity, workday and precedence penalties into a single scalar.
 
     Returns
     -------
@@ -619,7 +699,7 @@ def evaluate_route_cost(
     if not simulation.is_reachable:
         return math.inf
 
-    total_demand = sum(workday.customers_by_node_id[node_id].demand for node_id in customer_sequence)
+    total_demand = sum(workday.customers_by_id[customer_id].demand for customer_id in customer_sequence)
     capacity_excess = max(0.0, total_demand - vehicle.max_capacity)
     workday_excess_seconds = max(0.0, simulation.route_duration_seconds - vehicle.max_workday_seconds)
 
@@ -629,6 +709,7 @@ def evaluate_route_cost(
         + weights.time_window_penalty_weight * simulation.total_lateness_seconds
         + weights.capacity_penalty_weight * capacity_excess
         + weights.workday_penalty_weight * workday_excess_seconds
+        + weights.precedence_penalty_weight * simulation.precedence_violations
     )
 
 
@@ -669,7 +750,7 @@ def evaluate_state(
     UnknownVehicleError
         If a route references a vehicle absent from the workday fleet.
     UnknownCustomerError
-        If a route visits a node that is not a workday customer.
+        If a route visits a customer that is not part of the workday.
     DuplicateCustomerAssignmentError
         If a customer is assigned to more than one route.
     IncompleteCoverageError
@@ -694,11 +775,15 @@ def evaluate_state(
     total_workday_excess_seconds = sum(
         route_evaluation.workday_excess_seconds for route_evaluation in route_evaluations
     )
+    total_precedence_violations = sum(
+        route_evaluation.precedence_violations for route_evaluation in route_evaluations
+    )
     is_fully_reachable = all(route_evaluation.is_reachable for route_evaluation in route_evaluations)
     is_feasible = (
         is_fully_reachable
         and total_capacity_excess <= 0.0
         and total_workday_excess_seconds <= 0.0
+        and total_precedence_violations <= 0
     )
 
     if is_fully_reachable:
@@ -708,6 +793,7 @@ def evaluate_state(
             + weights.time_window_penalty_weight * total_time_window_lateness_seconds
             + weights.capacity_penalty_weight * total_capacity_excess
             + weights.workday_penalty_weight * total_workday_excess_seconds
+            + weights.precedence_penalty_weight * total_precedence_violations
         )
     else:
         # An unreachable route makes the state unusable regardless of the
@@ -724,6 +810,7 @@ def evaluate_state(
         total_capacity_excess=total_capacity_excess,
         total_time_window_lateness_seconds=total_time_window_lateness_seconds,
         total_workday_excess_seconds=total_workday_excess_seconds,
+        total_precedence_violations=total_precedence_violations,
         is_feasible=is_feasible,
         route_evaluations=route_evaluations,
     )
@@ -773,11 +860,12 @@ if __name__ == "__main__":
     # Split the customers evenly between the two vans as a simple, non-optimized
     # starting solution: the evaluator does not search for good routes, only
     # scores whichever candidate it is given.
-    midpoint = len(demonstration_customer_nodes) // 2
+    demonstration_customer_ids = [customer.customer_id for customer in demonstration_workday.customers]
+    midpoint = len(demonstration_customer_ids) // 2
     demonstration_state = VRPState(
         routes=(
-            Route(vehicle_id="VAN-1", customer_sequence=tuple(demonstration_customer_nodes[:midpoint])),
-            Route(vehicle_id="VAN-2", customer_sequence=tuple(demonstration_customer_nodes[midpoint:])),
+            Route(vehicle_id="VAN-1", customer_sequence=tuple(demonstration_customer_ids[:midpoint])),
+            Route(vehicle_id="VAN-2", customer_sequence=tuple(demonstration_customer_ids[midpoint:])),
         )
     )
 

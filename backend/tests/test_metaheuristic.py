@@ -35,7 +35,12 @@ from backend.src.domain.entities import (
     WorkdayInstance,
 )
 from backend.src.solver.constructive import build_initial_state
-from backend.src.solver.evaluator import EvaluationWeights, evaluate_route_cost, evaluate_state
+from backend.src.solver.evaluator import (
+    EvaluationWeights,
+    evaluate_route_cost,
+    evaluate_state,
+    simulate_route_clock,
+)
 from backend.src.solver.metaheuristic import (
     RelocateMove,
     SwapMove,
@@ -103,7 +108,7 @@ def _build_demo_workday(customer_nodes: list[int], vehicle_count: int, vehicle_c
 def test_tabu_list_expiry_boundaries() -> None:
     """A forbidden key is tabu at its forbidding iteration and for tenure-1 iterations after, no more."""
     tabu_list = TabuList(tabu_tenure=3)
-    key = ("relocate", 7, "VAN-1", "VAN-2")
+    key = ("relocate", "7", "VAN-1", "VAN-2")
 
     assert not tabu_list.is_tabu(key, current_iteration=0)
 
@@ -129,10 +134,10 @@ def test_move_is_admissible_aspiration_criterion() -> None:
 def test_relocate_reverse_tabu_key_matches_commit_key() -> None:
     """The candidate key of the exact reverse relocation must equal the forward move's commit key."""
     move = RelocateMove(
-        customer_node_id=9, source_vehicle_id="VAN-1", source_position=2, target_vehicle_id="VAN-2", target_position=0
+        customer_id="9", source_vehicle_id="VAN-1", source_position=2, target_vehicle_id="VAN-2", target_position=0
     )
     reverse_move = RelocateMove(
-        customer_node_id=9, source_vehicle_id="VAN-2", source_position=0, target_vehicle_id="VAN-1", target_position=2
+        customer_id="9", source_vehicle_id="VAN-2", source_position=0, target_vehicle_id="VAN-1", target_position=2
     )
 
     assert reverse_move.candidate_tabu_key == move.commit_tabu_key
@@ -141,10 +146,10 @@ def test_relocate_reverse_tabu_key_matches_commit_key() -> None:
 def test_swap_and_two_opt_moves_have_self_inverse_tabu_keys() -> None:
     """Swap and 2-opt undo themselves when repeated, so their commit and candidate keys must coincide."""
     swap = SwapMove(
-        first_customer_node_id=3,
+        first_customer_id="3",
         first_vehicle_id="VAN-1",
         first_position=0,
-        second_customer_node_id=8,
+        second_customer_id="8",
         second_vehicle_id="VAN-2",
         second_position=1,
     )
@@ -154,8 +159,8 @@ def test_swap_and_two_opt_moves_have_self_inverse_tabu_keys() -> None:
         vehicle_id="VAN-1",
         segment_start_position=1,
         segment_end_position=3,
-        segment_start_customer_node_id=11,
-        segment_end_customer_node_id=17,
+        segment_start_customer_id="11",
+        segment_end_customer_id="17",
     )
     assert two_opt.candidate_tabu_key == two_opt.commit_tabu_key
 
@@ -171,15 +176,15 @@ def test_two_opt_tabu_key_is_independent_of_array_positions() -> None:
         vehicle_id="VAN-1",
         segment_start_position=0,
         segment_end_position=2,
-        segment_start_customer_node_id=5,
-        segment_end_customer_node_id=9,
+        segment_start_customer_id="5",
+        segment_end_customer_id="9",
     )
     move_at_later_positions = TwoOptMove(
         vehicle_id="VAN-1",
         segment_start_position=4,
         segment_end_position=6,
-        segment_start_customer_node_id=5,
-        segment_end_customer_node_id=9,
+        segment_start_customer_id="5",
+        segment_end_customer_id="9",
     )
 
     assert move_at_early_positions.candidate_tabu_key == move_at_later_positions.candidate_tabu_key
@@ -219,7 +224,7 @@ def test_tabu_list_prevents_reverting_the_committed_relocate_immediately() -> No
 
     initial_state = VRPState(
         routes=(
-            Route(vehicle_id="VAN-1", customer_sequence=(customer_node_id,)),
+            Route(vehicle_id="VAN-1", customer_sequence=(customer.customer_id,)),
             Route(vehicle_id="VAN-2", customer_sequence=()),
         )
     )
@@ -232,9 +237,115 @@ def test_tabu_list_prevents_reverting_the_committed_relocate_immediately() -> No
     assert result.iterations_completed == 1
 
     routes_by_vehicle_id = {route.vehicle_id: route for route in result.best_state.routes}
-    assert routes_by_vehicle_id["VAN-2"].customer_sequence == (customer_node_id,)
+    assert routes_by_vehicle_id["VAN-2"].customer_sequence == (customer.customer_id,)
     assert routes_by_vehicle_id["VAN-1"].customer_sequence == ()
     assert result.best_evaluation.is_feasible
+
+
+# ---------------------------------------------------------------------------
+# Precedence penalty for pickup-and-delivery pairs (synthetic, deterministic)
+# ---------------------------------------------------------------------------
+
+
+def _build_pickup_delivery_pair(depot_node_id: int, delivery_node_id: int) -> tuple[Customer, Customer]:
+    """Build a mutually paired depot pickup and customer delivery stop."""
+    pickup = Customer(
+        node_id=depot_node_id,
+        demand=0.0,
+        customer_id="pickup-1",
+        is_pickup_stop=True,
+        paired_customer_id="delivery-1",
+    )
+    delivery = Customer(
+        node_id=delivery_node_id,
+        demand=10.0,
+        customer_id="delivery-1",
+        is_pickup_stop=False,
+        paired_customer_id="pickup-1",
+    )
+    return pickup, delivery
+
+
+def test_precedence_violation_is_recorded_when_delivery_precedes_pickup() -> None:
+    """A route visiting the delivery before its paired pickup must record exactly one violation."""
+    depot_node_id = 0
+    delivery_node_id = 1
+    cost_matrix = _build_synthetic_cost_matrix((depot_node_id, delivery_node_id))
+    pickup, delivery = _build_pickup_delivery_pair(depot_node_id, delivery_node_id)
+    workday = WorkdayInstance(customers=(pickup, delivery), fleet=(Vehicle(vehicle_id="VAN-1", max_capacity=50.0),))
+
+    out_of_order_simulation = simulate_route_clock(
+        (delivery.customer_id, pickup.customer_id),
+        workday.fleet_by_vehicle_id["VAN-1"],
+        workday,
+        cost_matrix,
+        build_schedule=False,
+    )
+
+    assert out_of_order_simulation.precedence_violations == 1
+    assert out_of_order_simulation.violating_customer_ids == (delivery.customer_id,)
+
+
+def test_precedence_is_not_violated_when_pickup_precedes_delivery() -> None:
+    """A route visiting the pickup before its paired delivery must record zero violations."""
+    depot_node_id = 0
+    delivery_node_id = 1
+    cost_matrix = _build_synthetic_cost_matrix((depot_node_id, delivery_node_id))
+    pickup, delivery = _build_pickup_delivery_pair(depot_node_id, delivery_node_id)
+    workday = WorkdayInstance(customers=(pickup, delivery), fleet=(Vehicle(vehicle_id="VAN-1", max_capacity=50.0),))
+
+    in_order_simulation = simulate_route_clock(
+        (pickup.customer_id, delivery.customer_id),
+        workday.fleet_by_vehicle_id["VAN-1"],
+        workday,
+        cost_matrix,
+        build_schedule=False,
+    )
+
+    assert in_order_simulation.precedence_violations == 0
+    assert in_order_simulation.violating_customer_ids == ()
+
+
+def test_precedence_violation_is_recorded_when_pair_is_split_across_vehicles() -> None:
+    """
+    A delivery visited by a route that never visits its paired pickup at all
+    (because the pickup was assigned to a different vehicle) must still be
+    recorded as a precedence violation, since the pickup was never visited by
+    *that* route regardless of what any other vehicle does.
+    """
+    depot_node_id = 0
+    delivery_node_id = 1
+    cost_matrix = _build_synthetic_cost_matrix((depot_node_id, delivery_node_id))
+    pickup, delivery = _build_pickup_delivery_pair(depot_node_id, delivery_node_id)
+    vehicle = Vehicle(vehicle_id="VAN-2", max_capacity=50.0)
+    workday = WorkdayInstance(customers=(pickup, delivery), fleet=(vehicle,))
+
+    delivery_only_simulation = simulate_route_clock(
+        (delivery.customer_id,), vehicle, workday, cost_matrix, build_schedule=False
+    )
+
+    assert delivery_only_simulation.precedence_violations == 1
+    assert delivery_only_simulation.violating_customer_ids == (delivery.customer_id,)
+
+
+def test_evaluate_route_cost_folds_in_the_precedence_penalty() -> None:
+    """`evaluate_route_cost` must add `precedence_penalty_weight` once per violation."""
+    depot_node_id = 0
+    delivery_node_id = 1
+    cost_matrix = _build_synthetic_cost_matrix((depot_node_id, delivery_node_id))
+    pickup, delivery = _build_pickup_delivery_pair(depot_node_id, delivery_node_id)
+    vehicle = Vehicle(vehicle_id="VAN-1", max_capacity=50.0)
+    workday = WorkdayInstance(customers=(pickup, delivery), fleet=(vehicle,))
+    weights = EvaluationWeights(precedence_penalty_weight=250000.0)
+
+    out_of_order_cost = evaluate_route_cost(
+        (delivery.customer_id, pickup.customer_id), vehicle, workday, cost_matrix, weights
+    )
+    in_order_cost = evaluate_route_cost(
+        (pickup.customer_id, delivery.customer_id), vehicle, workday, cost_matrix, weights
+    )
+
+    assert out_of_order_cost == pytest.approx(in_order_cost + weights.precedence_penalty_weight)
 
 
 # ---------------------------------------------------------------------------

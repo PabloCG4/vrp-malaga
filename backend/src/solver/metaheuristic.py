@@ -42,11 +42,11 @@ Every candidate move is costed through `evaluator.evaluate_route_cost`, the
 allocation-free fast path built on the same clock simulation core
 `evaluate_route` uses, so no `RouteEvaluation` or per-stop `RouteStopVisit` is
 ever built for a candidate that may be discarded a moment later. A candidate
-move only ever rebuilds the plain `tuple[int, ...]` customer sequence of the
-one or two routes it touches; a full `VRPState` (and the `Route` objects
-inside it) is only constructed once per iteration, for the single move that
-is actually committed, reusing `VRPState.with_route_replaced` for the same
-structural-sharing benefit the domain layer was designed around.
+move only ever rebuilds the plain `tuple[str, ...]` customer identifier
+sequence of the one or two routes it touches; a full `VRPState` (and the
+`Route` objects inside it) is only constructed once per iteration, for the
+single move that is actually committed, reusing `VRPState.with_route_replaced`
+for the same structural-sharing benefit the domain layer was designed around.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class RelocateMove:
 
     Attributes
     ----------
-    customer_node_id:
+    customer_id:
         Customer being relocated.
     source_vehicle_id:
         Vehicle whose route currently contains the customer.
@@ -101,25 +101,25 @@ class RelocateMove:
         has been removed from the source route, at which it is reinserted.
     """
 
-    customer_node_id: int
+    customer_id: str
     source_vehicle_id: str
     source_position: int
     target_vehicle_id: str
     target_position: int
 
     def touched_sequences(
-        self, current_sequences: Mapping[str, tuple[int, ...]]
-    ) -> dict[str, tuple[int, ...]]:
+        self, current_sequences: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
         """Return the new sequence(s) of the route(s) this move changes."""
         source_sequence = list(current_sequences[self.source_vehicle_id])
-        removed_customer_node_id = source_sequence.pop(self.source_position)
+        removed_customer_id = source_sequence.pop(self.source_position)
 
         if self.target_vehicle_id == self.source_vehicle_id:
-            source_sequence.insert(self.target_position, removed_customer_node_id)
+            source_sequence.insert(self.target_position, removed_customer_id)
             return {self.source_vehicle_id: tuple(source_sequence)}
 
         target_sequence = list(current_sequences[self.target_vehicle_id])
-        target_sequence.insert(self.target_position, removed_customer_node_id)
+        target_sequence.insert(self.target_position, removed_customer_id)
         return {
             self.source_vehicle_id: tuple(source_sequence),
             self.target_vehicle_id: tuple(target_sequence),
@@ -128,12 +128,12 @@ class RelocateMove:
     @property
     def candidate_tabu_key(self) -> Hashable:
         """Key identifying this exact relocation, checked before it is made."""
-        return ("relocate", self.customer_node_id, self.source_vehicle_id, self.target_vehicle_id)
+        return ("relocate", self.customer_id, self.source_vehicle_id, self.target_vehicle_id)
 
     @property
     def commit_tabu_key(self) -> Hashable:
         """Key forbidding the reverse relocation once this move is committed."""
-        return ("relocate", self.customer_node_id, self.target_vehicle_id, self.source_vehicle_id)
+        return ("relocate", self.customer_id, self.target_vehicle_id, self.source_vehicle_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,22 +143,22 @@ class SwapMove:
 
     Attributes
     ----------
-    first_customer_node_id, first_vehicle_id, first_position:
+    first_customer_id, first_vehicle_id, first_position:
         Identity and location of the first customer.
-    second_customer_node_id, second_vehicle_id, second_position:
+    second_customer_id, second_vehicle_id, second_position:
         Identity and location of the second customer.
     """
 
-    first_customer_node_id: int
+    first_customer_id: str
     first_vehicle_id: str
     first_position: int
-    second_customer_node_id: int
+    second_customer_id: str
     second_vehicle_id: str
     second_position: int
 
     def touched_sequences(
-        self, current_sequences: Mapping[str, tuple[int, ...]]
-    ) -> dict[str, tuple[int, ...]]:
+        self, current_sequences: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
         """Return the new sequence(s) of the route(s) this move changes."""
         if self.first_vehicle_id == self.second_vehicle_id:
             sequence = list(current_sequences[self.first_vehicle_id])
@@ -170,8 +170,8 @@ class SwapMove:
 
         first_sequence = list(current_sequences[self.first_vehicle_id])
         second_sequence = list(current_sequences[self.second_vehicle_id])
-        first_sequence[self.first_position] = self.second_customer_node_id
-        second_sequence[self.second_position] = self.first_customer_node_id
+        first_sequence[self.first_position] = self.second_customer_id
+        second_sequence[self.second_position] = self.first_customer_id
         return {
             self.first_vehicle_id: tuple(first_sequence),
             self.second_vehicle_id: tuple(second_sequence),
@@ -180,7 +180,7 @@ class SwapMove:
     @property
     def candidate_tabu_key(self) -> Hashable:
         """Key identifying this exact swap; a swap is its own reverse."""
-        return ("swap", *sorted((self.first_customer_node_id, self.second_customer_node_id)))
+        return ("swap", *sorted((self.first_customer_id, self.second_customer_id)))
 
     @property
     def commit_tabu_key(self) -> Hashable:
@@ -193,8 +193,8 @@ class TwoOptMove:
     """
     Reverse a contiguous segment of one route's customer sequence.
 
-    The tabu key is deliberately based on the customer node identifiers at
-    the two ends of the reversed segment, not on their array positions:
+    The tabu key is deliberately based on the customer identifiers at the
+    two ends of the reversed segment, not on their array positions:
     positions drift as Relocate and Swap moves change other routes' lengths
     across iterations, while the customers occupying a given segment stay a
     stable, well-defined identity for as long as that segment exists.
@@ -206,7 +206,7 @@ class TwoOptMove:
     segment_start_position, segment_end_position:
         Inclusive positions, within the route's sequence, bounding the
         segment to reverse (`segment_end_position > segment_start_position`).
-    segment_start_customer_node_id, segment_end_customer_node_id:
+    segment_start_customer_id, segment_end_customer_id:
         Customers occupying the segment's boundary positions at the time this
         move was generated, captured here so the tabu key never needs to look
         the sequence back up.
@@ -215,12 +215,12 @@ class TwoOptMove:
     vehicle_id: str
     segment_start_position: int
     segment_end_position: int
-    segment_start_customer_node_id: int
-    segment_end_customer_node_id: int
+    segment_start_customer_id: str
+    segment_end_customer_id: str
 
     def touched_sequences(
-        self, current_sequences: Mapping[str, tuple[int, ...]]
-    ) -> dict[str, tuple[int, ...]]:
+        self, current_sequences: Mapping[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
         """Return the new sequence of the one route this move changes."""
         sequence = list(current_sequences[self.vehicle_id])
         segment = sequence[self.segment_start_position : self.segment_end_position + 1]
@@ -232,7 +232,7 @@ class TwoOptMove:
         """Key identifying this exact reversal; reversing twice restores the original order."""
         return (
             "two_opt",
-            *sorted((self.segment_start_customer_node_id, self.segment_end_customer_node_id)),
+            *sorted((self.segment_start_customer_id, self.segment_end_customer_id)),
         )
 
     @property
@@ -250,7 +250,7 @@ def _locked_prefix_length(locked_prefix_lengths: Mapping[str, int], vehicle_id: 
 
 
 def _generate_relocate_moves(
-    current_sequences: Mapping[str, tuple[int, ...]],
+    current_sequences: Mapping[str, tuple[str, ...]],
     vehicle_ids: tuple[str, ...],
     locked_prefix_lengths: Mapping[str, int],
 ) -> Iterator[RelocateMove]:
@@ -260,7 +260,7 @@ def _generate_relocate_moves(
         source_lock = _locked_prefix_length(locked_prefix_lengths, source_vehicle_id, len(source_sequence))
 
         for source_position in range(source_lock, len(source_sequence)):
-            customer_node_id = source_sequence[source_position]
+            customer_id = source_sequence[source_position]
 
             for target_vehicle_id in vehicle_ids:
                 if target_vehicle_id == source_vehicle_id:
@@ -279,7 +279,7 @@ def _generate_relocate_moves(
                         continue
 
                     yield RelocateMove(
-                        customer_node_id=customer_node_id,
+                        customer_id=customer_id,
                         source_vehicle_id=source_vehicle_id,
                         source_position=source_position,
                         target_vehicle_id=target_vehicle_id,
@@ -288,12 +288,12 @@ def _generate_relocate_moves(
 
 
 def _generate_swap_moves(
-    current_sequences: Mapping[str, tuple[int, ...]],
+    current_sequences: Mapping[str, tuple[str, ...]],
     vehicle_ids: tuple[str, ...],
     locked_prefix_lengths: Mapping[str, int],
 ) -> Iterator[SwapMove]:
     """Yield every Swap move between two distinct, unlocked customer slots."""
-    unlocked_slots: list[tuple[str, int, int]] = []
+    unlocked_slots: list[tuple[str, int, str]] = []
     for vehicle_id in vehicle_ids:
         sequence = current_sequences[vehicle_id]
         lock = _locked_prefix_length(locked_prefix_lengths, vehicle_id, len(sequence))
@@ -301,22 +301,22 @@ def _generate_swap_moves(
             unlocked_slots.append((vehicle_id, position, sequence[position]))
 
     for first_index in range(len(unlocked_slots)):
-        first_vehicle_id, first_position, first_customer_node_id = unlocked_slots[first_index]
+        first_vehicle_id, first_position, first_customer_id = unlocked_slots[first_index]
         for second_index in range(first_index + 1, len(unlocked_slots)):
-            second_vehicle_id, second_position, second_customer_node_id = unlocked_slots[second_index]
+            second_vehicle_id, second_position, second_customer_id = unlocked_slots[second_index]
 
             yield SwapMove(
-                first_customer_node_id=first_customer_node_id,
+                first_customer_id=first_customer_id,
                 first_vehicle_id=first_vehicle_id,
                 first_position=first_position,
-                second_customer_node_id=second_customer_node_id,
+                second_customer_id=second_customer_id,
                 second_vehicle_id=second_vehicle_id,
                 second_position=second_position,
             )
 
 
 def _generate_two_opt_moves(
-    current_sequences: Mapping[str, tuple[int, ...]],
+    current_sequences: Mapping[str, tuple[str, ...]],
     vehicle_ids: tuple[str, ...],
     locked_prefix_lengths: Mapping[str, int],
 ) -> Iterator[TwoOptMove]:
@@ -331,13 +331,13 @@ def _generate_two_opt_moves(
                     vehicle_id=vehicle_id,
                     segment_start_position=segment_start_position,
                     segment_end_position=segment_end_position,
-                    segment_start_customer_node_id=sequence[segment_start_position],
-                    segment_end_customer_node_id=sequence[segment_end_position],
+                    segment_start_customer_id=sequence[segment_start_position],
+                    segment_end_customer_id=sequence[segment_end_position],
                 )
 
 
 def _generate_all_moves(
-    current_sequences: Mapping[str, tuple[int, ...]],
+    current_sequences: Mapping[str, tuple[str, ...]],
     vehicle_ids: tuple[str, ...],
     locked_prefix_lengths: Mapping[str, int],
 ) -> Iterator[Move]:
@@ -495,7 +495,7 @@ class TabuSearchResult:
 
 
 def _route_cost_cache(
-    sequences: Mapping[str, tuple[int, ...]],
+    sequences: Mapping[str, tuple[str, ...]],
     vehicle_ids: tuple[str, ...],
     workday: WorkdayInstance,
     cost_matrix: CostMatrix,
@@ -568,7 +568,7 @@ def run_tabu_search(
         If a route of `initial_state` references a vehicle absent from the
         workday fleet.
     UnknownCustomerError
-        If a route visits a node that is not a workday customer.
+        If a route visits a customer that is not part of the workday.
     DuplicateCustomerAssignmentError
         If a customer is assigned to more than one route.
     IncompleteCoverageError
@@ -585,7 +585,7 @@ def run_tabu_search(
     weights = config.evaluation_weights
     locks: Mapping[str, int] = locked_prefix_lengths if locked_prefix_lengths is not None else {}
 
-    current_sequences: dict[str, tuple[int, ...]] = {
+    current_sequences: dict[str, tuple[str, ...]] = {
         route.vehicle_id: route.customer_sequence for route in initial_state.routes
     }
     route_cost_by_vehicle_id = _route_cost_cache(current_sequences, vehicle_ids, workday, cost_matrix, weights)
@@ -608,7 +608,7 @@ def run_tabu_search(
     ):
         best_candidate_total_cost: float | None = None
         best_candidate_move: Move | None = None
-        best_candidate_touched_sequences: dict[str, tuple[int, ...]] | None = None
+        best_candidate_touched_sequences: dict[str, tuple[str, ...]] | None = None
         best_candidate_touched_costs: dict[str, float] | None = None
 
         for move in _generate_all_moves(current_sequences, vehicle_ids, locks):
