@@ -86,11 +86,13 @@ export interface WorkdayPlanSummary {
   updated_at: string
 }
 
-/** Mirrors `api/schemas/workday_plan.WorkdayPlanDetailRead` (detail view, with orders/fleet/route stops). */
+/** Mirrors `api/schemas/workday_plan.WorkdayPlanDetailRead` (detail view, with orders/fleet/route stops/events). */
 export interface WorkdayPlanDetail extends WorkdayPlanSummary {
   orders: Order[]
   route_stops: RouteStop[]
   vehicles: Vehicle[]
+  /** May be omitted by older API responses; the store normalizes missing values to `[]`. */
+  simulation_events?: SimulationEventRecord[]
 }
 
 /** Mirrors `api/schemas/optimization.WorkdayOptimizationResult`. */

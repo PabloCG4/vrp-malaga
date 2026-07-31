@@ -52,19 +52,25 @@ def get_depot_node() -> int:
     pool size `seed_db.py` uses, so a plan seeded by that script and later
     re-optimized through this API always departs from and returns to the
     same physical depot.
+
+    The street graph is loaded *before* acquiring `_graph_lock`. Calling
+    `get_street_network_graph()` while holding that non-reentrant lock
+    deadlocks on a cold cache (the geometry endpoint used to hang forever
+    and the map silently fell back to Euclidean polylines).
     """
     global _depot_node
-    if _depot_node is None:
-        with _graph_lock:
-            if _depot_node is None:
-                graph = get_street_network_graph()
-                depot_node, _candidate_nodes = select_demonstration_nodes(
-                    graph,
-                    STANDARD_CUSTOMER_POOL_SIZE + RESERVED_URGENT_NODE_COUNT,
-                    random_seed=RANDOM_SEED,
-                )
-                _depot_node = depot_node
-    return _depot_node
+    if _depot_node is not None:
+        return _depot_node
+    graph = get_street_network_graph()
+    with _graph_lock:
+        if _depot_node is None:
+            depot_node, _candidate_nodes = select_demonstration_nodes(
+                graph,
+                STANDARD_CUSTOMER_POOL_SIZE + RESERVED_URGENT_NODE_COUNT,
+                random_seed=RANDOM_SEED,
+            )
+            _depot_node = depot_node
+        return _depot_node
 
 
 def reset_network_cache_for_testing() -> None:

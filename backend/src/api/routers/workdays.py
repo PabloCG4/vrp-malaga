@@ -16,12 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.models import Vehicle, WorkdayPlan
 from ...db.session import get_db_session
+from ..schemas.geometry import WorkdayRouteGeometry
 from ..schemas.optimization import WorkdayOptimizationResult
 from ..schemas.order import OrderRead
 from ..schemas.route_stop import RouteStopRead
+from ..schemas.simulation_event import SimulationEventRead
 from ..schemas.vehicle import VehicleRead
 from ..schemas.workday_plan import WorkdayPlanDetailRead, WorkdayPlanRead
-from ..services import workday_service
+from ..services import geometry_service, workday_service
 from ..services.workday_service import (
     NoActiveVehicleError,
     WorkdayHasNoOrdersError,
@@ -46,6 +48,9 @@ def _to_detail_schema(workday_plan: WorkdayPlan, vehicles: list[Vehicle]) -> Wor
         orders=[OrderRead.model_validate(order) for order in workday_plan.orders],
         route_stops=[RouteStopRead.model_validate(route_stop) for route_stop in workday_plan.route_stops],
         vehicles=[VehicleRead.model_validate(vehicle) for vehicle in vehicles],
+        simulation_events=[
+            SimulationEventRead.model_validate(event) for event in workday_plan.simulation_events
+        ],
     )
 
 
@@ -58,7 +63,7 @@ async def list_workdays(session: AsyncSession = Depends(get_db_session)) -> list
 
 @router.get("/{workday_id}", response_model=WorkdayPlanDetailRead)
 async def get_workday(workday_id: int, session: AsyncSession = Depends(get_db_session)) -> WorkdayPlanDetailRead:
-    """Return one workday plan with its orders, active fleet, and planned route stops."""
+    """Return one workday plan with its orders, active fleet, planned route stops, and audit events."""
     try:
         workday_plan = await workday_service.get_workday_plan(session, workday_id)
     except WorkdayNotFoundError as error:
@@ -66,6 +71,24 @@ async def get_workday(workday_id: int, session: AsyncSession = Depends(get_db_se
 
     vehicles = await workday_service.list_active_vehicles(session)
     return _to_detail_schema(workday_plan, vehicles)
+
+
+@router.get("/{workday_id}/route-geometry", response_model=WorkdayRouteGeometry)
+async def get_workday_route_geometry(
+    workday_id: int, session: AsyncSession = Depends(get_db_session)
+) -> WorkdayRouteGeometry:
+    """
+    Return street-following polylines for every consecutive pair of route stops.
+
+    Reconstructs each leg via `CostMatrix.path_between` (preferring the live
+    session's patched matrix when a simulation is running), so the Control
+    Tower map can render routes that follow real Malaga streets instead of
+    Euclidean straight lines between stops.
+    """
+    try:
+        return await geometry_service.build_workday_route_geometry(session, workday_id)
+    except WorkdayNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
 
 
 @router.post(

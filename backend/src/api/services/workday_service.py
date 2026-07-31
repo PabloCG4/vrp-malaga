@@ -61,7 +61,11 @@ async def get_workday_plan(session: AsyncSession, workday_plan_id: int) -> Workd
     result = await session.execute(
         select(WorkdayPlan)
         .where(WorkdayPlan.id == workday_plan_id)
-        .options(selectinload(WorkdayPlan.orders), selectinload(WorkdayPlan.route_stops))
+        .options(
+            selectinload(WorkdayPlan.orders),
+            selectinload(WorkdayPlan.route_stops),
+            selectinload(WorkdayPlan.simulation_events),
+        )
     )
     workday_plan = result.scalar_one_or_none()
     if workday_plan is None:

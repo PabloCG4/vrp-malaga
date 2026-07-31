@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...db.enums import WorkdayStatus
 from .order import OrderRead
 from .route_stop import RouteStopRead
+from .simulation_event import SimulationEventRead
 from .vehicle import VehicleRead
 
 
@@ -64,4 +65,8 @@ class WorkdayPlanDetailRead(WorkdayPlanRead):
     )
     vehicles: list[VehicleRead] = Field(
         default_factory=list, description="Active fleet available to serve this plan's orders."
+    )
+    simulation_events: list[SimulationEventRead] = Field(
+        default_factory=list,
+        description="Audit log of traffic incidents and urgent orders injected during this plan's live simulation.",
     )

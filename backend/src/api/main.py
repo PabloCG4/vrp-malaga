@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..db.session import create_all_tables, dispose_engine
 from .routers.live_simulation import router as live_simulation_router
+from .routers.network import router as network_router
 from .routers.workdays import router as workdays_router
 from .services.live_simulation import live_simulation_manager
 
@@ -57,6 +58,7 @@ app.add_middleware(
 
 app.include_router(workdays_router)
 app.include_router(live_simulation_router)
+app.include_router(network_router)
 
 
 @app.get("/health", tags=["health"])

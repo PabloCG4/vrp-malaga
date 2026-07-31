@@ -11,12 +11,14 @@ validate SQLAlchemy models by hand.
 from __future__ import annotations
 
 from .driver import DriverBase, DriverCreate, DriverRead
+from .geometry import RouteLegGeometry, WorkdayRouteGeometry
 from .live_simulation import (
     EligibleUrgentOrderNode,
     EventInjectionAck,
     TrafficIncidentInjectionRequest,
     UrgentOrderInjectionRequest,
 )
+from .network import NetworkGraph, NetworkNode
 from .optimization import WorkdayOptimizationResult
 from .order import OrderBase, OrderCreate, OrderRead
 from .route_stop import (
@@ -66,4 +68,8 @@ __all__ = [
     "UrgentOrderInjectionRequest",
     "EventInjectionAck",
     "EligibleUrgentOrderNode",
+    "NetworkNode",
+    "NetworkGraph",
+    "RouteLegGeometry",
+    "WorkdayRouteGeometry",
 ]

@@ -1,492 +1,124 @@
-:root {
-  color-scheme: dark;
+@import 'tailwindcss';
+@import 'leaflet/dist/leaflet.css';
 
-  --bg: #0b0f17;
-  --bg-panel: #131926;
-  --bg-panel-alt: #182034;
-  --border: #263047;
-  --text: #c7d0e0;
-  --text-muted: #7d879c;
-  --text-heading: #f1f4fa;
+/**
+ * Design tokens for the Control Tower dashboard: a dark, high-contrast
+ * "logistics ops room" palette. Declaring these inside `@theme` (Tailwind
+ * v4's CSS-first configuration) automatically generates the matching
+ * utilities (`bg-surface`, `text-accent`, `border-border`, etc.), so no
+ * separate `tailwind.config.js` color palette is needed.
+ */
+@theme {
+  --color-surface: #0a0e16;
+  --color-surface-panel: #121828;
+  --color-surface-alt: #1a2236;
+  --color-surface-raised: #212b42;
+  --color-border: #263047;
+  --color-border-strong: #34405c;
 
-  --accent: #4f8dfd;
-  --accent-strong: #3a6fe0;
-  --success: #34d399;
-  --warning: #f5b942;
-  --danger: #f2555a;
+  --color-text: #c7d0e0;
+  --color-text-muted: #7d879c;
+  --color-text-heading: #f1f4fa;
 
-  --sans: 'Segoe UI', system-ui, Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --color-accent: #4f8dfd;
+  --color-accent-strong: #3a6fe0;
+  --color-success: #34d399;
+  --color-warning: #f5b942;
+  --color-danger: #f2555a;
+  --color-urgent: #f2555a;
 
-  font: 14px/1.5 var(--sans);
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  --font-sans: 'Segoe UI', system-ui, Roboto, sans-serif;
+  --font-mono: ui-monospace, Consolas, monospace;
 }
 
-* {
-  box-sizing: border-box;
-}
+@layer base {
+  html {
+    color-scheme: dark;
+  }
 
-body {
-  margin: 0;
-  min-height: 100vh;
-}
+  body {
+    @apply m-0 bg-surface text-text font-sans antialiased;
+  }
 
-#root {
-  min-height: 100vh;
-}
+  #root {
+    @apply min-h-screen;
+  }
 
-h1,
-h2,
-h3 {
-  font-weight: 600;
-  color: var(--text-heading);
-  margin: 0;
-}
-
-h2 {
-  font-size: 15px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-h3 {
-  font-size: 13px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 8px;
-}
-
-p {
-  margin: 0;
-}
-
-ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-button {
-  font: inherit;
-  cursor: pointer;
-}
-
-input,
-select {
-  font: inherit;
-  color: var(--text-heading);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-}
-
-/* -- Layout ---------------------------------------------------------------- */
-
-.dashboard {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-
-.dashboard__body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 320px 1fr 360px;
-  gap: 12px;
-  padding: 12px;
-  min-height: 0;
-}
-
-.dashboard__sidebar,
-.dashboard__telemetry {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.dashboard__main {
-  min-height: 0;
-  display: flex;
-}
-
-@media (max-width: 1100px) {
-  .dashboard__body {
-    grid-template-columns: 1fr;
+  h1,
+  h2,
+  h3 {
+    @apply text-text-heading font-semibold;
   }
 }
 
-/* -- Header ------------------------------------------------------------------ */
+@layer components {
+  .panel {
+    @apply flex flex-col gap-3 rounded-xl border border-border bg-surface-panel p-4;
+  }
 
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  .panel-title {
+    @apply text-xs font-semibold uppercase tracking-wide text-text-muted;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50
+      bg-accent text-white hover:bg-accent-strong;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50
+      border border-border-strong bg-surface-alt text-text hover:border-accent hover:text-text-heading;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-2.5 py-1 text-xs font-semibold
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50
+      border border-transparent text-text-muted hover:border-border-strong hover:text-text-heading;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50
+      bg-danger text-white hover:brightness-110;
+  }
+
+  .field-label {
+    @apply flex flex-col gap-1.5 text-xs font-medium text-text-muted;
+  }
+
+  .field-input {
+    @apply rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm text-text-heading
+      outline-none focus:border-accent;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide;
+  }
 }
 
-.app-header__brand {
-  display: flex;
-  flex-direction: column;
+/* Leaflet's default `.leaflet-container` background is a flat gray; match the ops-room theme. */
+.leaflet-container {
+  background: var(--color-surface-alt);
+  font-family: var(--font-sans);
 }
 
-.app-header__title {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-heading);
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
 }
 
-.app-header__subtitle {
-  font-size: 12px;
-  color: var(--text-muted);
+.leaflet-popup-content-wrapper {
+  border-radius: 0.75rem;
 }
 
-.app-header__status {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  font-size: 13px;
+.leaflet-control-attribution {
+  background: rgba(10, 14, 22, 0.7) !important;
+  color: var(--color-text-muted) !important;
 }
 
-.app-header__clock {
-  font-family: var(--mono);
-  color: var(--text-heading);
-  font-size: 16px;
-}
-
-/* -- Panel -------------------------------------------------------------------- */
-
-.panel {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.panel__block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.panel__block:first-of-type {
-  border-top: none;
-  padding-top: 0;
-}
-
-.panel__hint {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.panel__error {
-  color: var(--danger);
-  font-size: 13px;
-}
-
-/* -- Buttons -------------------------------------------------------------------- */
-
-.button {
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 14px;
-  font-weight: 600;
-  transition: background-color 0.15s ease;
-}
-
-.button:hover:not(:disabled) {
-  background: var(--accent-strong);
-}
-
-.button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.button--primary {
-  width: 100%;
-}
-
-.button--ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  padding: 4px 10px;
-  font-weight: 500;
-  font-size: 12px;
-}
-
-.button--ghost:hover:not(:disabled) {
-  color: var(--text-heading);
-  border-color: var(--text-muted);
-}
-
-/* -- Workday list --------------------------------------------------------------- */
-
-.workday-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 260px;
-  overflow-y: auto;
-}
-
-.workday-list__item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--bg-panel-alt);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  color: var(--text);
-}
-
-.workday-list__item:hover {
-  border-color: var(--accent);
-}
-
-.workday-list__item--active {
-  border-color: var(--accent);
-  background: rgba(79, 141, 253, 0.12);
-}
-
-.workday-list__status {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.workday-list__status--draft {
-  background: rgba(245, 185, 66, 0.18);
-  color: var(--warning);
-}
-
-.workday-list__status--active {
-  background: rgba(52, 211, 153, 0.18);
-  color: var(--success);
-}
-
-.workday-list__status--completed {
-  background: rgba(125, 135, 156, 0.18);
-  color: var(--text-muted);
-}
-
-/* -- Forms ------------------------------------------------------------------------ */
-
-.form {
-  gap: 8px;
-}
-
-.form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.form button {
-  margin-top: 4px;
-}
-
-/* -- Status badge ------------------------------------------------------------------ */
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--bg-panel-alt);
-  border: 1px solid var(--border);
-}
-
-.status-badge__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--text-muted);
-}
-
-.status-badge--open .status-badge__dot {
-  background: var(--success);
-}
-
-.status-badge--connecting .status-badge__dot,
-.status-badge--reconnecting .status-badge__dot {
-  background: var(--warning);
-}
-
-.status-badge--error .status-badge__dot,
-.status-badge--closed .status-badge__dot {
-  background: var(--danger);
-}
-
-/* -- Telemetry table ------------------------------------------------------------------ */
-
-.telemetry-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.telemetry-table th,
-.telemetry-table td {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.telemetry-table th {
-  color: var(--text-muted);
-  font-weight: 600;
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.vehicle-status {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-panel-alt);
-}
-
-.vehicle-status--driving {
-  color: var(--accent);
-}
-
-.vehicle-status--serving {
-  color: var(--success);
-}
-
-.vehicle-status--on_break,
-.vehicle-status--waiting {
-  color: var(--warning);
-}
-
-.vehicle-status--finished,
-.vehicle-status--idle_at_depot {
-  color: var(--text-muted);
-}
-
-/* -- Event log ------------------------------------------------------------------------- */
-
-.event-log {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.event-log__item {
-  display: flex;
-  gap: 8px;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--bg-panel-alt);
-  border-left: 3px solid var(--border);
-}
-
-.event-log__time {
-  color: var(--text-muted);
-  font-family: var(--mono);
-  white-space: nowrap;
-}
-
-.event-log__item--event {
-  border-left-color: var(--warning);
-}
-
-.event-log__item--reoptimization {
-  border-left-color: var(--accent);
-}
-
-.event-log__item--finished {
-  border-left-color: var(--success);
-}
-
-.event-log__item--error {
-  border-left-color: var(--danger);
-}
-
-/* -- Map placeholder ---------------------------------------------------------------------- */
-
-.map-placeholder {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-.map-placeholder__banner {
-  padding: 8px 16px;
-  background: var(--bg-panel-alt);
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  border-bottom: 1px dashed var(--border);
-}
-
-.map-placeholder__body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  padding: 16px;
-  overflow-y: auto;
-}
-
-.map-placeholder__list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-
-.tag {
-  margin-left: 6px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-
-.tag--urgent {
-  background: rgba(242, 85, 90, 0.18);
-  color: var(--danger);
+.leaflet-control-attribution a {
+  color: var(--color-text) !important;
 }

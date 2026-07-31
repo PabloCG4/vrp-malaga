@@ -132,6 +132,13 @@ def test_list_get_and_optimize_workday(tmp_path: Path) -> None:
             assert detail["status"] == "DRAFT"
             assert len(detail["orders"]) == STANDARD_ORDER_COUNT
             assert detail["route_stops"] == []
+            assert detail["simulation_events"] == []
+
+            empty_geometry_response = await client.get(f"/api/v1/workdays/{workday_plan_id}/route-geometry")
+            assert empty_geometry_response.status_code == 200
+            empty_geometry = empty_geometry_response.json()
+            assert empty_geometry["workday_plan_id"] == workday_plan_id
+            assert empty_geometry["legs"] == []
 
             missing_response = await client.get("/api/v1/workdays/999999")
             assert missing_response.status_code == 404
@@ -144,6 +151,22 @@ def test_list_get_and_optimize_workday(tmp_path: Path) -> None:
             assert optimization["workday_plan"]["status"] == "ACTIVE"
             assert len(optimization["workday_plan"]["route_stops"]) == optimization["route_stop_count"]
             assert len(optimization["workday_plan"]["orders"]) == STANDARD_ORDER_COUNT
+            assert optimization["workday_plan"]["simulation_events"] == []
+
+            geometry_response = await client.get(f"/api/v1/workdays/{workday_plan_id}/route-geometry")
+            assert geometry_response.status_code == 200
+            geometry = geometry_response.json()
+            assert geometry["workday_plan_id"] == workday_plan_id
+            assert len(geometry["legs"]) > 0
+            longest_leg = max(geometry["legs"], key=lambda leg: len(leg["coordinates"]))
+            assert len(longest_leg["coordinates"]) >= 3
+            first_coordinate = longest_leg["coordinates"][0]
+            assert len(first_coordinate) == 2
+            assert isinstance(first_coordinate[0], float)
+            assert isinstance(first_coordinate[1], float)
+
+            missing_geometry_response = await client.get("/api/v1/workdays/999999/route-geometry")
+            assert missing_geometry_response.status_code == 404
 
             repeat_response = await client.post(f"/api/v1/workdays/{workday_plan_id}/optimize")
             assert repeat_response.status_code == 409

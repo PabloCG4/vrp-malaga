@@ -1,34 +1,39 @@
 import { Header } from './Header'
 import { WorkdaySelectorPanel } from '../panels/WorkdaySelectorPanel'
 import { ControlPanel } from '../panels/ControlPanel'
-import { TelemetryPanel } from '../panels/TelemetryPanel'
+import { FleetPanel } from '../panels/FleetPanel'
 import { EventLogPanel } from '../panels/EventLogPanel'
-import { MapPlaceholder } from '../map/MapPlaceholder'
+import { LeafletMap } from '../map/LeafletMap'
+import { TrafficIncidentModal } from '../modals/TrafficIncidentModal'
+import { UrgentOrderModal } from '../modals/UrgentOrderModal'
 
 /**
  * Root dashboard shell: header, left-hand sidebar (workday selection and
- * dispatch controls), central map slot, and right-hand telemetry/activity
- * feed. Every panel is a self-contained view over `useSimulationStore`; this
- * component only arranges them and holds no state of its own, so Block 2
- * can slot in a real map/richer panels without touching this layout.
+ * dispatch controls), central interactive map, and right-hand fleet
+ * telemetry/activity timeline. Every panel is a self-contained view over
+ * `useSimulationStore` (plus, from this block on, `networkStore`/`uiStore`
+ * for map-only concerns); this component only arranges them.
  */
 export function DashboardLayout() {
   return (
-    <div className="dashboard">
+    <div className="flex h-screen flex-col bg-surface">
       <Header />
-      <div className="dashboard__body">
-        <aside className="dashboard__sidebar">
+      <div className="grid min-h-0 flex-1 grid-cols-[20rem_1fr_22rem] gap-4 p-4">
+        <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto">
           <WorkdaySelectorPanel />
           <ControlPanel />
         </aside>
-        <main className="dashboard__main">
-          <MapPlaceholder />
+        <main className="min-h-0">
+          <LeafletMap />
         </main>
-        <aside className="dashboard__telemetry">
-          <TelemetryPanel />
+        <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto">
+          <FleetPanel />
           <EventLogPanel />
         </aside>
       </div>
+
+      <TrafficIncidentModal />
+      <UrgentOrderModal />
     </div>
   )
 }

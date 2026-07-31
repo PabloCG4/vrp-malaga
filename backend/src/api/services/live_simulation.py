@@ -223,6 +223,27 @@ def _reoptimization_payload(workday_plan_id: int, telemetry: ReoptimizationTelem
     }
 
 
+def _reoptimization_summary_dict(telemetry: ReoptimizationTelemetry) -> dict[str, Any]:
+    """
+    Compact re-optimization metrics embedded in a persisted `SimulationEvent.payload_json`.
+
+    Lets the Control Tower restore both the disruption and its paired cost
+    comparison in the activity timeline after a page reload or plan re-select,
+    without introducing a new event-type enum value / DB migration.
+    """
+    return {
+        "trigger_description": telemetry.trigger_description,
+        "triggered_at_minute": telemetry.triggered_at_minute,
+        "iterations_completed": telemetry.iterations_completed,
+        "elapsed_seconds": telemetry.elapsed_seconds,
+        "cost_before": telemetry.cost_before,
+        "cost_after": telemetry.cost_after,
+        "feasible_before": telemetry.feasible_before,
+        "feasible_after": telemetry.feasible_after,
+        "locked_prefixes_respected": telemetry.locked_prefixes_respected,
+    }
+
+
 class LiveSimulationSession:
     """
     Drives one workday plan's `DynamicSimulator` on an accelerated, real-time clock.
@@ -535,12 +556,15 @@ class LiveSimulationSession:
                 self._pending_reopenings.append((reopen_at_minute, closed_edges))
                 self._pending_reopenings.sort(key=lambda scheduled: scheduled[0])
 
-            payload = {
+            payload: dict[str, Any] = {
                 "first_node": first_node,
                 "second_node": second_node,
                 "reopen_after_minutes": reopen_after_minutes,
                 "description": description,
             }
+            reoptimization_summary = self._latest_reoptimization_summary(trigger_minute)
+            if reoptimization_summary is not None:
+                payload["reoptimization"] = reoptimization_summary
             async with _resolve_session_factory()() as session:
                 session.add(
                     SimulationEvent(
@@ -610,7 +634,7 @@ class LiveSimulationSession:
                 message = f"No active vehicle is available to serve urgent order '{resolved_order_id}'."
                 raise NoVehicleAvailableError(message)
 
-            payload = {
+            payload: dict[str, Any] = {
                 "order_id": resolved_order_id,
                 "delivery_node": delivery_node,
                 "demand": demand,
@@ -619,6 +643,9 @@ class LiveSimulationSession:
                 "deadline_minutes_after_trigger": deadline_minutes_after_trigger,
                 "description": description,
             }
+            reoptimization_summary = self._latest_reoptimization_summary(trigger_minute)
+            if reoptimization_summary is not None:
+                payload["reoptimization"] = reoptimization_summary
             async with _resolve_session_factory()() as session:
                 await self._persist_urgent_order_pair(session, event)
                 session.add(
@@ -714,12 +741,31 @@ class LiveSimulationSession:
         simulator.telemetry_log.append(telemetry)
 
         async with _resolve_session_factory()() as session:
+            session.add(
+                SimulationEvent(
+                    workday_plan_id=self.workday_plan_id,
+                    event_type=SimulationEventType.TRAFFIC_INCIDENT,
+                    trigger_minute=simulator.clock.current_minute,
+                    payload_json={
+                        "reopened": True,
+                        "description": "Street reopened",
+                        "reoptimization": _reoptimization_summary_dict(telemetry),
+                    },
+                )
+            )
             await self._rewrite_route_stops(session)
             await self._sync_actual_telemetry(session)
             await session.commit()
 
         await self._broadcast(_reoptimization_payload(self.workday_plan_id, telemetry))
         await self._broadcast(self._build_state_payload("tick"))
+
+    def _latest_reoptimization_summary(self, trigger_minute: int) -> dict[str, Any] | None:
+        """Return the most recent re-optimization metrics for `trigger_minute`, if any."""
+        latest_telemetry = self.simulator.telemetry_log[-1] if self.simulator.telemetry_log else None
+        if latest_telemetry is None or latest_telemetry.triggered_at_minute != trigger_minute:
+            return None
+        return _reoptimization_summary_dict(latest_telemetry)
 
     async def _run_loop(self) -> None:
         """Advance the simulated clock one minute at a time until the workday finishes."""

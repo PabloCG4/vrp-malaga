@@ -1,14 +1,15 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { Spinner } from '../common/Spinner'
 import { useSimulationStore } from '../../store/simulationStore'
+import { useUiStore } from '../../store/uiStore'
 
 /**
- * Dispatcher actions for the currently selected workday plan: 1-click static
- * optimization for a `DRAFT` plan, and real-time disruption injection
- * (traffic incident / urgent order) for an `ACTIVE` one.
+ * Dispatcher actions for the currently selected workday plan.
  *
- * Node ids are entered as raw numbers here; Block 2's Leaflet map is the
- * intended replacement for these inputs (click-to-select a street or a
- * delivery point), which is why this panel is deliberately minimal.
+ * For a `DRAFT` plan, this is the 1-click static optimization trigger. For
+ * an `ACTIVE` one, it opens the two disruption-injection modals (traffic
+ * incident / urgent order); the traffic modal can alternatively be opened
+ * with `first_node`/`second_node` already chosen on the map via the
+ * "Road Closure Selection Mode" tool (see `map/LeafletMap.tsx`).
  */
 export function ControlPanel() {
   const activePlan = useSimulationStore((state) => state.activePlan)
@@ -16,162 +17,77 @@ export function ControlPanel() {
   const optimizeError = useSimulationStore((state) => state.optimizeError)
   const optimizeActivePlan = useSimulationStore((state) => state.optimizeActivePlan)
 
-  const eligibleNodes = useSimulationStore((state) => state.eligibleUrgentOrderNodes)
-  const isLoadingEligibleNodes = useSimulationStore((state) => state.isLoadingEligibleNodes)
-  const fetchEligibleUrgentOrderNodes = useSimulationStore((state) => state.fetchEligibleUrgentOrderNodes)
-  const isInjectingTrafficIncident = useSimulationStore((state) => state.isInjectingTrafficIncident)
-  const isInjectingUrgentOrder = useSimulationStore((state) => state.isInjectingUrgentOrder)
-  const injectionError = useSimulationStore((state) => state.injectionError)
-  const injectTrafficIncident = useSimulationStore((state) => state.injectTrafficIncident)
-  const injectUrgentOrder = useSimulationStore((state) => state.injectUrgentOrder)
-
-  const [firstNode, setFirstNode] = useState('')
-  const [secondNode, setSecondNode] = useState('')
-  const [reopenAfterMinutes, setReopenAfterMinutes] = useState('')
-  const [trafficDescription, setTrafficDescription] = useState('Traffic incident')
-
-  const [deliveryNode, setDeliveryNode] = useState('')
-  const [demandKg, setDemandKg] = useState('10')
-  const [orderDescription, setOrderDescription] = useState('Urgent order')
-
-  const isActive = activePlan?.status === 'ACTIVE'
-
-  useEffect(() => {
-    if (isActive) {
-      void fetchEligibleUrgentOrderNodes()
-    }
-  }, [isActive, activePlan?.id, fetchEligibleUrgentOrderNodes])
+  const openTrafficModal = useUiStore((state) => state.openTrafficModal)
+  const openUrgentOrderModal = useUiStore((state) => state.openUrgentOrderModal)
+  const toggleRoadClosureMode = useUiStore((state) => state.toggleRoadClosureMode)
+  const isRoadClosureMode = useUiStore((state) => state.isRoadClosureMode)
 
   if (activePlan === null) {
     return (
       <section className="panel">
-        <h2>Dispatch Controls</h2>
-        <p className="panel__hint">Select a workday plan to enable dispatch controls.</p>
+        <h2 className="panel-title">Dispatch Controls</h2>
+        <p className="text-sm text-text-muted">Select a workday plan to enable dispatch controls.</p>
       </section>
     )
   }
 
-  function handleOptimize(): void {
-    void optimizeActivePlan()
-  }
-
-  function handleInjectTrafficIncident(event: FormEvent<HTMLFormElement>): void {
-    event.preventDefault()
-    const parsedFirstNode = Number.parseInt(firstNode, 10)
-    const parsedSecondNode = Number.parseInt(secondNode, 10)
-    if (Number.isNaN(parsedFirstNode) || Number.isNaN(parsedSecondNode)) {
-      return
-    }
-    const parsedReopenAfterMinutes = reopenAfterMinutes.trim().length > 0 ? Number.parseInt(reopenAfterMinutes, 10) : null
-    void injectTrafficIncident({
-      first_node: parsedFirstNode,
-      second_node: parsedSecondNode,
-      reopen_after_minutes: parsedReopenAfterMinutes,
-      description: trafficDescription,
-    })
-  }
-
-  function handleInjectUrgentOrder(event: FormEvent<HTMLFormElement>): void {
-    event.preventDefault()
-    const parsedDeliveryNode = Number.parseInt(deliveryNode, 10)
-    const parsedDemand = Number.parseFloat(demandKg)
-    if (Number.isNaN(parsedDeliveryNode) || Number.isNaN(parsedDemand)) {
-      return
-    }
-    void injectUrgentOrder({
-      delivery_node: parsedDeliveryNode,
-      demand: parsedDemand,
-      description: orderDescription,
-    })
-  }
+  const isActive = activePlan.status === 'ACTIVE'
 
   return (
     <section className="panel">
-      <h2>Dispatch Controls</h2>
+      <h2 className="panel-title">Dispatch Controls</h2>
 
-      <div className="panel__block">
-        <p>
-          Orders: <strong>{activePlan.orders.length}</strong> &middot; Vehicles:{' '}
-          <strong>{activePlan.vehicles.length}</strong> &middot; Route stops:{' '}
-          <strong>{activePlan.route_stops.length}</strong>
-        </p>
-        <p>
-          Total cost: <strong>{activePlan.total_cost.toFixed(2)}</strong> &middot; Distance:{' '}
-          <strong>{activePlan.total_distance_km.toFixed(2)} km</strong>
-        </p>
-      </div>
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+        <div>
+          <dt className="text-xs text-text-muted">Orders</dt>
+          <dd className="font-semibold text-text-heading">{(activePlan.orders ?? []).length}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Vehicles</dt>
+          <dd className="font-semibold text-text-heading">{(activePlan.vehicles ?? []).length}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Total cost</dt>
+          <dd className="font-semibold text-text-heading">{(activePlan.total_cost ?? 0).toFixed(1)}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Distance</dt>
+          <dd className="font-semibold text-text-heading">{(activePlan.total_distance_km ?? 0).toFixed(1)} km</dd>
+        </div>
+      </dl>
 
-      {activePlan.status === 'DRAFT' && (
-        <div className="panel__block">
-          <button type="button" className="button button--primary" onClick={handleOptimize} disabled={isOptimizing}>
-            {isOptimizing ? 'Optimizing…' : '1-Click Dispatch Optimization'}
+      {isActive && (
+        <div className="flex flex-col gap-2 border-t border-border pt-3">
+          <button type="button" className="btn-danger justify-start" onClick={() => toggleRoadClosureMode()}>
+            🚧 {isRoadClosureMode ? 'Cancel Road Closure Selection' : 'Select Road Closure on Map'}
           </button>
-          {optimizeError && <p className="panel__error">{optimizeError}</p>}
+          <button type="button" className="btn-secondary justify-start" onClick={() => openTrafficModal()}>
+            Inject Traffic Incident (manual)
+          </button>
+          <button type="button" className="btn-secondary justify-start" onClick={openUrgentOrderModal}>
+            Inject Urgent Order
+          </button>
         </div>
       )}
 
-      {isActive && (
-        <>
-          <form className="panel__block form" onSubmit={handleInjectTrafficIncident}>
-            <h3>Inject Traffic Incident</h3>
-            <label>
-              First node id
-              <input value={firstNode} onChange={(event) => setFirstNode(event.target.value)} required inputMode="numeric" />
-            </label>
-            <label>
-              Second node id (adjacent street)
-              <input value={secondNode} onChange={(event) => setSecondNode(event.target.value)} required inputMode="numeric" />
-            </label>
-            <label>
-              Reopen after (minutes, optional)
-              <input
-                value={reopenAfterMinutes}
-                onChange={(event) => setReopenAfterMinutes(event.target.value)}
-                inputMode="numeric"
-              />
-            </label>
-            <label>
-              Description
-              <input value={trafficDescription} onChange={(event) => setTrafficDescription(event.target.value)} />
-            </label>
-            <button type="submit" className="button" disabled={isInjectingTrafficIncident}>
-              {isInjectingTrafficIncident ? 'Injecting…' : 'Close Street'}
-            </button>
-          </form>
-
-          <form className="panel__block form" onSubmit={handleInjectUrgentOrder}>
-            <h3>Inject Urgent Order</h3>
-            <label>
-              Delivery node
-              <select value={deliveryNode} onChange={(event) => setDeliveryNode(event.target.value)} required>
-                <option value="" disabled>
-                  {isLoadingEligibleNodes ? 'Loading eligible nodes…' : 'Select a node'}
-                </option>
-                {eligibleNodes.map((node) => (
-                  <option key={node.node_id} value={node.node_id}>
-                    Node {node.node_id} ({node.latitude.toFixed(4)}, {node.longitude.toFixed(4)})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Demand (kg)
-              <input value={demandKg} onChange={(event) => setDemandKg(event.target.value)} required inputMode="decimal" />
-            </label>
-            <label>
-              Description
-              <input value={orderDescription} onChange={(event) => setOrderDescription(event.target.value)} />
-            </label>
-            <button type="submit" className="button" disabled={isInjectingUrgentOrder}>
-              {isInjectingUrgentOrder ? 'Injecting…' : 'Inject Urgent Order'}
-            </button>
-          </form>
-
-          {injectionError && <p className="panel__error">{injectionError}</p>}
-        </>
+      {activePlan.status === 'COMPLETED' && (
+        <p className="border-t border-border pt-3 text-sm text-text-muted">This workday has finished simulating.</p>
       )}
 
-      {activePlan.status === 'COMPLETED' && <p className="panel__hint">This workday has finished simulating.</p>}
+      {activePlan.status === 'DRAFT' && (
+        <div className="border-t border-border pt-3">
+          <button
+            type="button"
+            className="btn-primary w-full"
+            onClick={() => void optimizeActivePlan()}
+            disabled={isOptimizing}
+          >
+            {isOptimizing && <Spinner />}
+            {isOptimizing ? 'Optimizing route plan…' : '1-Click Dispatch Optimization'}
+          </button>
+          {optimizeError && <p className="mt-2 text-xs text-danger">{optimizeError}</p>}
+        </div>
+      )}
     </section>
   )
 }

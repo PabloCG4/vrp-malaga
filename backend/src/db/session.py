@@ -134,7 +134,18 @@ def build_engine(database_url: str | None = None, echo: bool = False) -> AsyncEn
     """
     raw_url = database_url or resolve_database_url()
     async_url, connect_args = normalize_database_url(raw_url)
-    return create_async_engine(async_url, echo=echo, future=True, connect_args=connect_args)
+    return create_async_engine(
+        async_url,
+        echo=echo,
+        future=True,
+        connect_args=connect_args,
+        # Neon's serverless endpoints silently close idle connections well
+        # before SQLAlchemy's pool would otherwise recycle them; without
+        # `pool_pre_ping`, the first checkout of such a stale connection
+        # surfaces to the client as a raw `asyncpg.InterfaceError` ("connection
+        # is closed") instead of transparently reconnecting.
+        pool_pre_ping=True,
+    )
 
 
 def get_engine() -> AsyncEngine:
