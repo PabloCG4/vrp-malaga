@@ -7,6 +7,9 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...db.enums import WorkdayStatus
+from .order import OrderRead
+from .route_stop import RouteStopRead
+from .vehicle import VehicleRead
 
 
 class WorkdayPlanBase(BaseModel):
@@ -43,3 +46,22 @@ class WorkdayPlanRead(WorkdayPlanBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+
+class WorkdayPlanDetailRead(WorkdayPlanRead):
+    """
+    Workday plan with its full context: orders, fleet and planned route stops.
+
+    Returned by `GET /api/v1/workdays/{id}` and by the optimize endpoint, so
+    a dispatcher can inspect the exact orders behind a plan, the active fleet
+    available to serve them, and, once optimized, the resulting per-vehicle
+    sequence, in a single call.
+    """
+
+    orders: list[OrderRead] = Field(default_factory=list, description="Every order belonging to this plan.")
+    route_stops: list[RouteStopRead] = Field(
+        default_factory=list, description="Planned sequence of every vehicle, empty until the plan is optimized."
+    )
+    vehicles: list[VehicleRead] = Field(
+        default_factory=list, description="Active fleet available to serve this plan's orders."
+    )

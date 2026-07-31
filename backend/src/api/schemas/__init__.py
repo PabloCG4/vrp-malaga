@@ -11,6 +11,13 @@ validate SQLAlchemy models by hand.
 from __future__ import annotations
 
 from .driver import DriverBase, DriverCreate, DriverRead
+from .live_simulation import (
+    EligibleUrgentOrderNode,
+    EventInjectionAck,
+    TrafficIncidentInjectionRequest,
+    UrgentOrderInjectionRequest,
+)
+from .optimization import WorkdayOptimizationResult
 from .order import OrderBase, OrderCreate, OrderRead
 from .route_stop import (
     RouteStopBase,
@@ -27,6 +34,7 @@ from .vehicle import VehicleBase, VehicleCreate, VehicleRead
 from .workday_plan import (
     WorkdayPlanBase,
     WorkdayPlanCreate,
+    WorkdayPlanDetailRead,
     WorkdayPlanRead,
     WorkdayPlanUpdate,
 )
@@ -42,6 +50,8 @@ __all__ = [
     "WorkdayPlanCreate",
     "WorkdayPlanUpdate",
     "WorkdayPlanRead",
+    "WorkdayPlanDetailRead",
+    "WorkdayOptimizationResult",
     "OrderBase",
     "OrderCreate",
     "OrderRead",
@@ -52,4 +62,8 @@ __all__ = [
     "SimulationEventBase",
     "SimulationEventCreate",
     "SimulationEventRead",
+    "TrafficIncidentInjectionRequest",
+    "UrgentOrderInjectionRequest",
+    "EventInjectionAck",
+    "EligibleUrgentOrderNode",
 ]
